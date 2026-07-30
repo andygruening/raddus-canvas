@@ -60,11 +60,7 @@ textarea:disabled {
   min-height: 100vh;
   font-family: var(--font-product);
   color: var(--primary-text);
-  background:
-    linear-gradient(var(--border-subtle) 1px, transparent 1px),
-    linear-gradient(90deg, var(--border-subtle) 1px, transparent 1px),
-    #fff;
-  background-size: 32px 32px;
+  background: #fff;
 }
 
 .app-shell {
@@ -1722,15 +1718,23 @@ textarea:focus {
   border: 0;
   border-radius: 0;
   cursor: grab;
-  background:
-    linear-gradient(var(--border-subtle) 1px, transparent 1px),
-    linear-gradient(90deg, var(--border-subtle) 1px, transparent 1px),
-    var(--surface-bg);
-  background-size: 32px 32px;
+  background: var(--surface-bg);
 }
 
 .project-canvas:active {
   cursor: grabbing;
+}
+
+.grid-field {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image: radial-gradient(circle, rgba(18, 35, 63, 0.18) 1.2px, transparent 1.2px);
+  background-position: 0 0;
+  background-size: 24px 24px;
+  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.88), rgba(0, 0, 0, 0.54));
+  -webkit-mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.88), rgba(0, 0, 0, 0.54));
 }
 
 .project-world {
@@ -3972,17 +3976,28 @@ textarea:focus {
 }
 
 .signin-shell {
+  position: relative;
   display: grid;
   place-items: center;
+  overflow: hidden;
   padding: 24px;
-  background:
-    linear-gradient(var(--border-subtle) 1px, transparent 1px),
-    linear-gradient(90deg, var(--border-subtle) 1px, transparent 1px),
-    #fff;
-  background-size: 32px 32px;
+  background: #fff;
+}
+
+.signin-shell::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: radial-gradient(circle, rgba(18, 35, 63, 0.18) 1.2px, transparent 1.2px);
+  background-position: 0 0;
+  background-size: 24px 24px;
+  mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.88), rgba(0, 0, 0, 0.54));
+  -webkit-mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.88), rgba(0, 0, 0, 0.54));
 }
 
 .signin-panel {
+  position: relative;
   width: min(420px, 100%);
   display: grid;
   justify-items: center;
@@ -3995,6 +4010,46 @@ textarea:focus {
   text-align: center;
 }
 
+.signin-panel.local-key-panel {
+  width: min(400px, calc(100vw - 40px));
+  justify-items: stretch;
+  gap: 0;
+  padding: 22px 24px;
+  border-radius: 16px;
+  border-color: #d6e4f5;
+  box-shadow: 0 12px 26px rgba(18, 35, 63, 0.1);
+  text-align: left;
+}
+
+.signin-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.signin-title-copy {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.local-key-panel .signin-logo.local-key-logo {
+  flex: 0 0 auto;
+  width: 42px;
+  height: 42px;
+  border-radius: 10px;
+  color: #1f73ff;
+  border-color: #b9d6ff;
+  background: #e8f2ff;
+}
+
+.local-key-panel h1 {
+  color: #10203e;
+  font-size: 24px;
+  line-height: 1.05;
+  font-weight: 800;
+}
+
 .signin-tagline {
   max-width: 280px;
   margin: 0;
@@ -4002,6 +4057,15 @@ textarea:focus {
   font-size: 15px;
   line-height: 1.4;
   font-weight: 700;
+}
+
+.local-key-panel .signin-tagline {
+  margin-top: 18px;
+  max-width: none;
+  color: #5f708b;
+  font-size: 13px;
+  line-height: 1.35;
+  font-weight: 800;
 }
 
 .local-key-form {
@@ -4012,7 +4076,13 @@ textarea:focus {
   text-align: left;
 }
 
-.local-key-form label {
+.local-key-panel .local-key-form {
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.local-key-form label,
+.local-key-input-wrap {
   display: grid;
   gap: 6px;
 }
@@ -4023,26 +4093,93 @@ textarea:focus {
   font-weight: 700;
 }
 
+.local-key-input-wrap {
+  position: relative;
+}
+
 .local-key-form input {
   width: 100%;
   min-height: 42px;
-  padding: 0 12px;
-  border-radius: 6px;
-  border: 1px solid var(--input-border);
+  padding: 0 38px 0 12px;
+  border-radius: 8px;
+  border: 1px solid #c8d8ec;
   background: var(--surface-bg);
   color: var(--primary-text);
   font: inherit;
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.local-key-form input::placeholder {
+  color: #737373;
+  opacity: 1;
 }
 
 .local-key-form input:focus {
-  outline: 2px solid color-mix(in srgb, var(--brand) 28%, transparent);
+  outline: 3px solid rgba(31, 115, 255, 0.16);
   outline-offset: 2px;
-  border-color: var(--brand);
+  border-color: #7dafed;
+}
+
+.local-key-input-mark {
+  position: absolute;
+  top: 50%;
+  right: 7px;
+  width: 20px;
+  height: 20px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  pointer-events: none;
+}
+
+.local-key-input-mark span {
+  width: 2px;
+  background: #0d6f7b;
+  border-radius: 1px;
+}
+
+.local-key-input-mark span:nth-child(1) {
+  height: 16px;
+}
+
+.local-key-input-mark span:nth-child(2) {
+  height: 12px;
+}
+
+.local-key-input-mark span:nth-child(3) {
+  height: 8px;
 }
 
 .local-key-form .primary-button {
   width: 100%;
+  min-height: 42px;
   justify-content: center;
+  border-radius: 8px;
+  border: 1px solid #c8d8ec;
+  background: #fff;
+  color: #8ea0ba;
+  font-size: 16px;
+  font-weight: 800;
+}
+
+.local-key-form .primary-button svg {
+  width: 16px;
+  height: 16px;
+}
+
+.local-key-form .primary-button:hover:not(:disabled) {
+  border-color: #9ebbe1;
+  background: #f8fbff;
+  color: #10203e;
+}
+
+.local-key-form .primary-button:disabled {
+  border-color: #c8d8ec;
+  background: #fff;
+  color: #8ea0ba;
 }
 
 .confirm-backdrop {

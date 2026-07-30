@@ -60,7 +60,7 @@ import { ANTHROPIC_PUBLIC_API_BASE_URL, AnthropicApiError, AnthropicProxyApi, cl
 import presetCatalog from "./data/presets.json";
 import { clearStoredAnthropicApiKey, readStoredAnthropicApiKey, writeStoredAnthropicApiKey } from "./storage/secureAnthropicKeyStorage";
 import { LocalCanvasStore } from "./storage/localCanvasStore";
-import "../../../packages/styles/fleeet.css";
+import "./generic.css";
 import "./styles.css";
 
 type JsonObject = Record<string, unknown>;
@@ -2553,25 +2553,34 @@ function SignInView({ onAuth }: { onAuth: (auth: AuthSession, apiKey: string) =>
 
   return (
     <main className="signin-shell" style={themedStyle}>
-      <section className="signin-panel">
-        <div className="signin-logo local-key-logo" aria-hidden="true">
-          <KeyRound size={30} />
+      <section className="signin-panel local-key-panel">
+        <div className="signin-heading">
+          <div className="signin-logo local-key-logo" aria-hidden="true">
+            <KeyRound size={22} />
+          </div>
+          <div className="signin-title-copy">
+            <h1>Raddus Canvas</h1>
+          </div>
         </div>
-        <h1>Raddus Canvas</h1>
-        <p className="signin-tagline">Enter an Anthropic API key to open Raddus Canvas.</p>
+        <p className="signin-tagline">Enter a valid Anthropic API Key. Your key is securely stored on this device.</p>
         <form className="local-key-form" onSubmit={submit}>
-          <label>
-            <span>Anthropic API key</span>
+          <div className="local-key-input-wrap">
             <input
               value={apiKey}
               onChange={(event) => setApiKey(event.target.value)}
               type="password"
               placeholder="sk-ant-api..."
+              aria-label="Anthropic API key"
               autoComplete="off"
               spellCheck={false}
               required
             />
-          </label>
+            <span className="local-key-input-mark" aria-hidden="true">
+              <span />
+              <span />
+              <span />
+            </span>
+          </div>
           {error ? <div className="notice error">{error}</div> : null}
           <button className="primary-button" type="submit" disabled={saving || !apiKey.trim()}>
             {saving ? <Loader2 className="spin" size={16} aria-hidden="true" /> : <KeyRound size={16} aria-hidden="true" />}
@@ -3555,6 +3564,7 @@ function ProjectsView({
             onPointerDown={handleCanvasPointerDown}
             onWheel={handleCanvasWheel}
           >
+            <div className="grid-field" aria-hidden="true" />
             <div className="project-controls-overlay">
               <div className="canvas-control-group project-select-group">
                 <select
