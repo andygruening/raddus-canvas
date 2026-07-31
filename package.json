@@ -24,7 +24,6 @@
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "description": "",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
     "@vitejs/plugin-react": "^6.0.2",
