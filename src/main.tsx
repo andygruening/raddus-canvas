@@ -57,9 +57,9 @@ import {
   overlayRecipe,
   tableRecipe,
 } from "../styling.gen";
-import { ANTHROPIC_PUBLIC_API_BASE_URL, AnthropicApiError, AnthropicProxyApi, clearAnthropicProxySession, createAnthropicProxySession } from "./api/AnthropicProxyApi";
+import { ANTHROPIC_PUBLIC_API_BASE_URL, AnthropicApiError, AnthropicProxyApi, clearAnthropicProxySession, createAnthropicProxySession, readAnthropicProxySession } from "./api/AnthropicProxyApi";
 import presetCatalog from "./data/presets.json";
-import { clearStoredAnthropicApiKey, readStoredAnthropicApiKey, writeStoredAnthropicApiKey } from "./storage/secureAnthropicKeyStorage";
+import { clearStoredAnthropicApiKey, readStoredAnthropicApiKey } from "./storage/secureAnthropicKeyStorage";
 import { LocalCanvasStore } from "./storage/localCanvasStore";
 import "./generic.css";
 import "./styles.css";
@@ -293,6 +293,14 @@ interface ProjectGraph {
   edges: ProjectEdge[];
 }
 
+interface CanvasViewport {
+  x: number;
+  y: number;
+  zoom: number;
+}
+
+type CanvasViewportsByProject = Record<string, CanvasViewport>;
+
 interface GeneratedAgentSpec {
   name: string;
   description: string;
@@ -507,10 +515,12 @@ const paletteMcpSectionsStorageKey = "raddus-canvas-palette-mcp-sections";
 const legacyPaletteMcpSectionsStorageKey = "agent-registry-palette-mcp-sections";
 const paletteSkillSectionsStorageKey = "raddus-canvas-palette-skill-sections";
 const legacyPaletteSkillSectionsStorageKey = "agent-registry-palette-skill-sections";
+const canvasViewportsStorageKey = "raddus-canvas-viewports";
 const localUserId = "local-anthropic-user";
 const localUserEmail = "Local Anthropic key";
 const localCanvasStore = new LocalCanvasStore();
 const themedStyle = themeVariables();
+const defaultCanvasViewport: CanvasViewport = { x: 0, y: 0, zoom: 1 };
 const defaultAgentModel = "claude-opus-4-8";
 const agentModelOptions = [
   { value: "claude-opus-4-8", label: "Claude Opus 4.8" },
@@ -529,6 +539,8 @@ function App() {
   const [createdCanvasAgentPlacement, setCreatedCanvasAgentPlacement] = React.useState<{ projectId: string; agentId: string; x: number; y: number; nonce: number } | null>(null);
   const [projects, setProjects] = React.useState<ProjectRecord[]>([]);
   const [selectedProjectId, setSelectedProjectId] = React.useState(() => readProjectIdFromPath() ?? readStoredSelectedProjectId());
+  const [localSettingsReady, setLocalSettingsReady] = React.useState(false);
+  const [canvasViewports, setCanvasViewports] = React.useState<CanvasViewportsByProject>(() => readStoredCanvasViewports());
   const [projectsLoading, setProjectsLoading] = React.useState(false);
   const [projectSaving, setProjectSaving] = React.useState(false);
   const [projectRunning, setProjectRunning] = React.useState(false);
@@ -623,12 +635,33 @@ function App() {
   const agentsRef = React.useRef<AgentRecord[]>([]);
   const mcpServersRef = React.useRef<RegisteredMcpServer[]>([]);
   const skillsRef = React.useRef<SkillRecord[]>([]);
+  const canvasViewportsRef = React.useRef<CanvasViewportsByProject>(canvasViewports);
   const agentConnectorUpdateQueuesRef = React.useRef<Record<string, Promise<void>>>({});
 
   React.useEffect(() => {
     removeProjectPathFromUrl();
     window.addEventListener("popstate", removeProjectPathFromUrl);
     return () => window.removeEventListener("popstate", removeProjectPathFromUrl);
+  }, []);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    void readServerLocalSettings().then((settings) => {
+      if (cancelled) return;
+      cacheServerLocalSettings(settings);
+      if (typeof settings.selectedProjectId === "string") {
+        setSelectedProjectId(settings.selectedProjectId);
+      }
+      if (settings.canvasViewports) {
+        canvasViewportsRef.current = settings.canvasViewports;
+        setCanvasViewports(settings.canvasViewports);
+      }
+    }).catch(() => undefined).finally(() => {
+      if (!cancelled) setLocalSettingsReady(true);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   React.useEffect(() => {
@@ -654,6 +687,22 @@ function App() {
   React.useEffect(() => {
     skillsRef.current = skills;
   }, [skills]);
+
+  React.useEffect(() => {
+    canvasViewportsRef.current = canvasViewports;
+  }, [canvasViewports]);
+
+  const storeCanvasViewport = React.useCallback((projectId: string, viewport: CanvasViewport) => {
+    const normalized = normalizeCanvasViewport(viewport);
+    if (!projectId || !normalized) return;
+    const current = canvasViewportsRef.current;
+    if (canvasViewportsEqual(current[projectId], normalized)) return;
+    const next = { ...current, [projectId]: normalized };
+    canvasViewportsRef.current = next;
+    setCanvasViewports(next);
+    cacheCanvasViewports(next);
+    patchServerLocalSettings({ canvasViewports: next });
+  }, []);
 
   const loadProjects = React.useCallback(async () => {
     if (!auth) return;
@@ -691,8 +740,9 @@ function App() {
   }, [auth, loadProjects]);
 
   React.useEffect(() => {
+    if (!localSettingsReady) return;
     storeSelectedProjectId(selectedProjectId);
-  }, [selectedProjectId]);
+  }, [localSettingsReady, selectedProjectId]);
 
   const loadAgents = React.useCallback(async (): Promise<AgentRecord[]> => {
     if (!auth) return agentsRef.current;
@@ -1012,8 +1062,8 @@ function App() {
     [emailReceivers, selectedProject?.id],
   );
   async function handleAuth(nextAuth: AuthSession, apiKey: string) {
-    await writeStoredAnthropicApiKey(apiKey);
-    await writeStoredAuth(nextAuth);
+    void apiKey;
+    await Promise.allSettled([clearStoredAnthropicApiKey(), writeStoredAuth(nextAuth)]);
     setAuth(nextAuth);
   }
 
@@ -2263,6 +2313,8 @@ function App() {
             <ProjectsView
               projects={projects}
               selectedProjectId={selectedProjectId}
+              localSettingsReady={localSettingsReady}
+              canvasViewports={canvasViewports}
               agents={projectAgents}
               mcpServers={visibleMcpServers}
               skills={visibleSkills}
@@ -2292,6 +2344,7 @@ function App() {
               onSave={(project) => {
                 void saveProject(project);
               }}
+              onCanvasViewportChange={storeCanvasViewport}
               onCreate={() => {
                 setProjectCreateOpen(true);
               }}
@@ -2694,6 +2747,8 @@ function SignInView({ onAuth }: { onAuth: (auth: AuthSession, apiKey: string) =>
 function ProjectsView({
   projects,
   selectedProjectId,
+  localSettingsReady,
+  canvasViewports,
   agents,
   mcpServers,
   skills,
@@ -2721,6 +2776,7 @@ function ProjectsView({
   error,
   projectSaving,
   onSave,
+  onCanvasViewportChange,
   onCreate,
   onSelectProject,
   onSubAgentEdgeChange,
@@ -2755,6 +2811,8 @@ function ProjectsView({
 }: {
   projects: ProjectRecord[];
   selectedProjectId: string;
+  localSettingsReady: boolean;
+  canvasViewports: CanvasViewportsByProject;
   agents: AgentRecord[];
   mcpServers: RegisteredMcpServer[];
   skills: SkillRecord[];
@@ -2782,6 +2840,7 @@ function ProjectsView({
   error: string | null;
   projectSaving: boolean;
   onSave: (project: ProjectRecord) => void;
+  onCanvasViewportChange: (projectId: string, viewport: CanvasViewport) => void;
   onCreate: () => void;
   onSelectProject: (projectId: string) => void;
   onSubAgentEdgeChange: (agentId: string, subAgentId: string, enabled: boolean) => void;
@@ -2820,7 +2879,7 @@ function ProjectsView({
   const [connectingFromId, setConnectingFromId] = React.useState<string | null>(null);
   const [lastPaletteTab, setLastPaletteTab] = React.useState<PaletteTab>("triggers");
   const [palette, setPalette] = React.useState<{ x: number; y: number; tab: PaletteTab } | null>(null);
-  const [camera, setCamera] = React.useState({ x: 0, y: 0, zoom: 1 });
+  const [camera, setCamera] = React.useState<CanvasViewport>(defaultCanvasViewport);
   const [playPanelNodeId, setPlayPanelNodeId] = React.useState<string | null>(null);
   const [selectedPlaySessionId, setSelectedPlaySessionId] = React.useState("");
   const [playSessionMessages, setPlaySessionMessages] = React.useState<ChatMessage[]>([]);
@@ -2838,6 +2897,10 @@ function ProjectsView({
   const connectionPreviewPathRef = React.useRef<SVGPathElement | null>(null);
   const cameraRef = React.useRef(camera);
   const cameraFrameRef = React.useRef<number | null>(null);
+  const cameraSaveTimeoutRef = React.useRef<number | null>(null);
+  const pendingCameraSaveRef = React.useRef<{ projectId: string; viewport: CanvasViewport } | null>(null);
+  const restoredCameraProjectIdRef = React.useRef<string | null>(null);
+  const lastStoredCameraRef = React.useRef<{ projectId: string; viewport: CanvasViewport } | null>(null);
   const suppressNodeClickRef = React.useRef(false);
   const lastSavedProjectShapeRef = React.useRef<string>("");
   const draftProjectIdRef = React.useRef<string | null>(selectedProject?.id ?? null);
@@ -2845,6 +2908,42 @@ function ProjectsView({
   React.useEffect(() => {
     cameraRef.current = camera;
   }, [camera]);
+
+  React.useEffect(() => {
+    if (!localSettingsReady) return;
+    const projectId = selectedProject?.id ?? null;
+    if (!projectId) {
+      flushCameraSave();
+      restoredCameraProjectIdRef.current = null;
+      lastStoredCameraRef.current = null;
+      cameraRef.current = defaultCanvasViewport;
+      setCamera(defaultCanvasViewport);
+      return;
+    }
+    if (restoredCameraProjectIdRef.current === projectId) return;
+    flushCameraSave();
+    const restoredViewport = canvasViewports[projectId] ?? defaultCanvasViewport;
+    restoredCameraProjectIdRef.current = projectId;
+    lastStoredCameraRef.current = { projectId, viewport: restoredViewport };
+    cameraRef.current = restoredViewport;
+    setCamera(restoredViewport);
+  }, [canvasViewports, localSettingsReady, selectedProject?.id]);
+
+  React.useEffect(() => {
+    if (!localSettingsReady || !selectedProject?.id) return;
+    queueCameraSave(selectedProject.id, camera);
+  }, [camera, localSettingsReady, selectedProject?.id]);
+
+  React.useEffect(() => {
+    function flushBeforeUnload() {
+      flushCameraSave();
+    }
+    window.addEventListener("beforeunload", flushBeforeUnload);
+    return () => {
+      window.removeEventListener("beforeunload", flushBeforeUnload);
+      flushCameraSave();
+    };
+  }, []);
 
   React.useEffect(() => {
     const nextProjectId = selectedProject?.id ?? null;
@@ -3010,13 +3109,48 @@ function ProjectsView({
     return screenToWorld(rect.left + rect.width / 2, rect.top + rect.height / 2);
   }
 
-  function scheduleCamera(nextCamera: { x: number; y: number; zoom: number }) {
+  function scheduleCamera(nextCamera: CanvasViewport) {
     cameraRef.current = nextCamera;
     if (cameraFrameRef.current !== null) return;
     cameraFrameRef.current = window.requestAnimationFrame(() => {
       cameraFrameRef.current = null;
       setCamera(cameraRef.current);
     });
+  }
+
+  function queueCameraSave(projectId: string, viewport: CanvasViewport) {
+    const normalized = normalizeCanvasViewport(viewport);
+    if (!normalized) return;
+    const lastStored = lastStoredCameraRef.current;
+    if (lastStored?.projectId === projectId && canvasViewportsEqual(lastStored.viewport, normalized)) {
+      if (pendingCameraSaveRef.current?.projectId === projectId) {
+        pendingCameraSaveRef.current = null;
+        if (cameraSaveTimeoutRef.current !== null) {
+          window.clearTimeout(cameraSaveTimeoutRef.current);
+          cameraSaveTimeoutRef.current = null;
+        }
+      }
+      return;
+    }
+    pendingCameraSaveRef.current = { projectId, viewport: normalized };
+    if (cameraSaveTimeoutRef.current !== null) window.clearTimeout(cameraSaveTimeoutRef.current);
+    cameraSaveTimeoutRef.current = window.setTimeout(() => {
+      flushCameraSave();
+    }, 350);
+  }
+
+  function flushCameraSave() {
+    if (cameraSaveTimeoutRef.current !== null) {
+      window.clearTimeout(cameraSaveTimeoutRef.current);
+      cameraSaveTimeoutRef.current = null;
+    }
+    const pending = pendingCameraSaveRef.current;
+    if (!pending) return;
+    pendingCameraSaveRef.current = null;
+    const lastStored = lastStoredCameraRef.current;
+    if (lastStored?.projectId === pending.projectId && canvasViewportsEqual(lastStored.viewport, pending.viewport)) return;
+    lastStoredCameraRef.current = pending;
+    onCanvasViewportChange(pending.projectId, pending.viewport);
   }
 
   function moveNode(nodeId: string, x: number, y: number) {
@@ -3648,6 +3782,7 @@ function ProjectsView({
     }
 
     function onUp() {
+      flushCameraSave();
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     }
@@ -11929,14 +12064,25 @@ function readIconFile(file: File): Promise<string> {
   });
 }
 
+interface ServerLocalSettings {
+  selectedProjectId?: string;
+  canvasViewports?: CanvasViewportsByProject;
+  paletteAgentSections?: { global: boolean; project: boolean };
+  paletteMcpSections?: { global: boolean; project: boolean };
+  paletteSkillSections?: { builtIn: boolean; global: boolean; project: boolean };
+}
+
 async function readStoredAuth(): Promise<AuthSession | null> {
+  const serverSession = await readAnthropicProxySession<AuthSession>().catch(() => null);
+  if (serverSession) return serverSession;
+
   const apiKey = await readStoredAnthropicApiKey().catch(() => null);
-  if (!apiKey) {
-    await clearLocalAuthStorage();
-    return null;
-  }
+  if (!apiKey) return null;
+
   try {
-    return await createAnthropicProxySession<AuthSession>(apiKey);
+    const migratedSession = await createAnthropicProxySession<AuthSession>(apiKey);
+    await clearStoredAnthropicApiKey();
+    return migratedSession;
   } catch {
     await clearLocalAuthStorage();
     return null;
@@ -11966,6 +12112,58 @@ function clearStoredAuth() {
   void clearLocalAuthStorage();
 }
 
+async function readServerLocalSettings(): Promise<ServerLocalSettings> {
+  const response = await fetch("/api/local-store/settings", { credentials: "same-origin" });
+  const payload = await response.json().catch(() => ({})) as unknown;
+  if (!response.ok) throw new Error(errorMessageFromLocalSettingsPayload(payload) ?? `Settings request failed with ${response.status}`);
+  return isRecord(payload) && isRecord(payload.settings) ? normalizeServerLocalSettings(payload.settings) : {};
+}
+
+function patchServerLocalSettings(settings: ServerLocalSettings): void {
+  void fetch("/api/local-store/settings", {
+    method: "PATCH",
+    credentials: "same-origin",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(settings),
+  }).catch(() => undefined);
+}
+
+function normalizeServerLocalSettings(value: JsonObject): ServerLocalSettings {
+  return {
+    ...(typeof value.selectedProjectId === "string" ? { selectedProjectId: value.selectedProjectId } : {}),
+    ...(isRecord(value.canvasViewports) ? { canvasViewports: normalizeCanvasViewports(value.canvasViewports) } : {}),
+    ...(isRecord(value.paletteAgentSections) ? { paletteAgentSections: {
+      global: typeof value.paletteAgentSections.global === "boolean" ? value.paletteAgentSections.global : true,
+      project: typeof value.paletteAgentSections.project === "boolean" ? value.paletteAgentSections.project : true,
+    } } : {}),
+    ...(isRecord(value.paletteMcpSections) ? { paletteMcpSections: {
+      global: typeof value.paletteMcpSections.global === "boolean" ? value.paletteMcpSections.global : true,
+      project: typeof value.paletteMcpSections.project === "boolean" ? value.paletteMcpSections.project : true,
+    } } : {}),
+    ...(isRecord(value.paletteSkillSections) ? { paletteSkillSections: {
+      builtIn: typeof value.paletteSkillSections.builtIn === "boolean" ? value.paletteSkillSections.builtIn : true,
+      global: typeof value.paletteSkillSections.global === "boolean" ? value.paletteSkillSections.global : true,
+      project: typeof value.paletteSkillSections.project === "boolean" ? value.paletteSkillSections.project : true,
+    } } : {}),
+  };
+}
+
+function cacheServerLocalSettings(settings: ServerLocalSettings): void {
+  if (typeof settings.selectedProjectId === "string") cacheSelectedProjectId(settings.selectedProjectId);
+  if (settings.canvasViewports) cacheCanvasViewports(settings.canvasViewports);
+  if (settings.paletteAgentSections) cacheJsonSetting(paletteAgentSectionsStorageKey, legacyPaletteAgentSectionsStorageKey, settings.paletteAgentSections);
+  if (settings.paletteMcpSections) cacheJsonSetting(paletteMcpSectionsStorageKey, legacyPaletteMcpSectionsStorageKey, settings.paletteMcpSections);
+  if (settings.paletteSkillSections) cacheJsonSetting(paletteSkillSectionsStorageKey, legacyPaletteSkillSectionsStorageKey, settings.paletteSkillSections);
+}
+
+function errorMessageFromLocalSettingsPayload(payload: unknown): string | null {
+  if (!isRecord(payload)) return null;
+  const error = payload.error;
+  if (typeof error === "string") return error;
+  if (isRecord(error) && typeof error.message === "string") return error.message;
+  return typeof payload.message === "string" ? payload.message : null;
+}
+
 function readProjectIdFromPath(): string | null {
   const match = window.location.pathname.match(/^\/project\/([^/]+)\/?$/);
   return match ? decodeURIComponent(match[1]) : null;
@@ -11985,12 +12183,17 @@ function readStoredSelectedProjectId(): string {
   if (stored) return stored;
   const legacyStored = localStorage.getItem(legacySelectedProjectStorageKey) ?? "";
   if (legacyStored) {
-    localStorage.setItem(selectedProjectStorageKey, legacyStored);
+    cacheSelectedProjectId(legacyStored);
   }
   return legacyStored;
 }
 
 function storeSelectedProjectId(projectId: string) {
+  cacheSelectedProjectId(projectId);
+  patchServerLocalSettings({ selectedProjectId: projectId });
+}
+
+function cacheSelectedProjectId(projectId: string) {
   if (projectId) {
     localStorage.setItem(selectedProjectStorageKey, projectId);
     localStorage.removeItem(legacySelectedProjectStorageKey);
@@ -11998,6 +12201,54 @@ function storeSelectedProjectId(projectId: string) {
     localStorage.removeItem(selectedProjectStorageKey);
     localStorage.removeItem(legacySelectedProjectStorageKey);
   }
+}
+
+function readStoredCanvasViewports(): CanvasViewportsByProject {
+  const raw = localStorage.getItem(canvasViewportsStorageKey);
+  if (!raw) return {};
+  try {
+    const value = JSON.parse(raw) as unknown;
+    return isRecord(value) ? normalizeCanvasViewports(value) : {};
+  } catch {
+    localStorage.removeItem(canvasViewportsStorageKey);
+    return {};
+  }
+}
+
+function cacheCanvasViewports(viewports: CanvasViewportsByProject) {
+  localStorage.setItem(canvasViewportsStorageKey, JSON.stringify(viewports));
+}
+
+function normalizeCanvasViewports(value: JsonObject): CanvasViewportsByProject {
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([projectId, viewport]) => [projectId, normalizeCanvasViewport(viewport)] as const)
+      .filter((entry): entry is [string, CanvasViewport] => Boolean(entry[0] && entry[1])),
+  );
+}
+
+function normalizeCanvasViewport(value: unknown): CanvasViewport | null {
+  if (!isRecord(value)) return null;
+  if (typeof value.x !== "number" || typeof value.y !== "number" || typeof value.zoom !== "number") return null;
+  if (!Number.isFinite(value.x) || !Number.isFinite(value.y) || !Number.isFinite(value.zoom)) return null;
+  return {
+    x: roundCanvasViewportValue(value.x),
+    y: roundCanvasViewportValue(value.y),
+    zoom: roundCanvasViewportValue(Math.min(2.2, Math.max(0.35, value.zoom)), 1000),
+  };
+}
+
+function roundCanvasViewportValue(value: number, factor = 100): number {
+  return Math.round(value * factor) / factor;
+}
+
+function canvasViewportsEqual(left: CanvasViewport | undefined, right: CanvasViewport | undefined): boolean {
+  return Boolean(left && right && left.x === right.x && left.y === right.y && left.zoom === right.zoom);
+}
+
+function cacheJsonSetting(storageKey: string, legacyStorageKey: string, value: unknown) {
+  localStorage.setItem(storageKey, JSON.stringify(value));
+  localStorage.removeItem(legacyStorageKey);
 }
 
 function readMigratedLocalStorageValue(storageKey: string, legacyStorageKey: string): string | null {
@@ -12034,8 +12285,8 @@ function readPaletteAgentSections(): { global: boolean; project: boolean } {
 }
 
 function writePaletteAgentSections(value: { global: boolean; project: boolean }) {
-  localStorage.setItem(paletteAgentSectionsStorageKey, JSON.stringify(value));
-  localStorage.removeItem(legacyPaletteAgentSectionsStorageKey);
+  cacheJsonSetting(paletteAgentSectionsStorageKey, legacyPaletteAgentSectionsStorageKey, value);
+  patchServerLocalSettings({ paletteAgentSections: value });
 }
 
 function readPaletteMcpSections(): { global: boolean; project: boolean } {
@@ -12057,8 +12308,8 @@ function readPaletteMcpSections(): { global: boolean; project: boolean } {
 }
 
 function writePaletteMcpSections(value: { global: boolean; project: boolean }) {
-  localStorage.setItem(paletteMcpSectionsStorageKey, JSON.stringify(value));
-  localStorage.removeItem(legacyPaletteMcpSectionsStorageKey);
+  cacheJsonSetting(paletteMcpSectionsStorageKey, legacyPaletteMcpSectionsStorageKey, value);
+  patchServerLocalSettings({ paletteMcpSections: value });
 }
 
 function readPaletteSkillSections(): { builtIn: boolean; global: boolean; project: boolean } {
@@ -12081,8 +12332,8 @@ function readPaletteSkillSections(): { builtIn: boolean; global: boolean; projec
 }
 
 function writePaletteSkillSections(value: { builtIn: boolean; global: boolean; project: boolean }) {
-  localStorage.setItem(paletteSkillSectionsStorageKey, JSON.stringify(value));
-  localStorage.removeItem(legacyPaletteSkillSectionsStorageKey);
+  cacheJsonSetting(paletteSkillSectionsStorageKey, legacyPaletteSkillSectionsStorageKey, value);
+  patchServerLocalSettings({ paletteSkillSections: value });
 }
 
 function agentProjectIdsFromMetadata(metadata: Record<string, string>): string[] {

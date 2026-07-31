@@ -4,6 +4,7 @@ const dbVersion = 1;
 const projectStoreName = "projects";
 const mcpServerStoreName = "mcpServers";
 let legacyMigrationPromise: Promise<void> | null = null;
+let serverMigrationPromise: Promise<void> | null = null;
 
 export type LocalRecord = object & { id: string };
 
@@ -31,22 +32,83 @@ export class LocalCanvasStore {
   }
 
   private async list<T>(storeName: string): Promise<T[]> {
-    const db = await openDb();
-    await migrateLegacyData(db);
-    return withStore<T[]>(db, storeName, "readonly", (store) => store.getAll());
+    await migrateBrowserDataToServer();
+    const response = await serverStoreFetch<{ records: T[] }>(`/api/local-store/${encodeURIComponent(storeName)}`);
+    return response.records;
   }
 
   private async put(storeName: string, value: LocalRecord): Promise<void> {
-    const db = await openDb();
-    await migrateLegacyData(db);
-    await withStore<void>(db, storeName, "readwrite", (store) => store.put(value));
+    await migrateBrowserDataToServer();
+    await serverStoreFetch<{ record: LocalRecord }>(`/api/local-store/${encodeURIComponent(storeName)}/${encodeURIComponent(value.id)}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(value),
+    });
   }
 
   private async delete(storeName: string, key: string): Promise<void> {
-    const db = await openDb();
-    await migrateLegacyData(db);
-    await withStore<void>(db, storeName, "readwrite", (store) => store.delete(key));
+    await migrateBrowserDataToServer();
+    await serverStoreFetch<{ ok: true }>(`/api/local-store/${encodeURIComponent(storeName)}/${encodeURIComponent(key)}`, {
+      method: "DELETE",
+    });
   }
+}
+
+async function migrateBrowserDataToServer(): Promise<void> {
+  serverMigrationPromise ??= (async () => {
+    if (typeof indexedDB === "undefined") return;
+    const db = await openDb();
+    try {
+      await migrateLegacyData(db);
+      const [projects, mcpServers] = await Promise.all([
+        withStore<LocalRecord[]>(db, projectStoreName, "readonly", (store) => store.getAll()),
+        withStore<LocalRecord[]>(db, mcpServerStoreName, "readonly", (store) => store.getAll()),
+      ]);
+      if (projects.length === 0 && mcpServers.length === 0) return;
+      await serverStoreFetch("/api/local-store/import", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ projects, mcpServers }),
+      });
+    } catch {
+      // The server store remains the source of truth if browser migration fails.
+    } finally {
+      db.close();
+    }
+  })();
+  return serverMigrationPromise;
+}
+
+async function serverStoreFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const response = await fetch(path, { credentials: "same-origin", ...init });
+  const payload = await responseJson(response);
+  if (!response.ok) {
+    const message = errorMessageFromPayload(payload) ?? `Local store request failed with ${response.status}`;
+    throw new Error(message);
+  }
+  return payload as T;
+}
+
+async function responseJson(response: Response): Promise<unknown> {
+  const text = await response.text();
+  if (!text) return {};
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return text;
+  }
+}
+
+function errorMessageFromPayload(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const record = payload as Record<string, unknown>;
+  const error = record.error;
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object" && typeof (error as Record<string, unknown>).message === "string") {
+    return (error as Record<string, string>).message;
+  }
+  if (typeof record.message === "string") return record.message;
+  return null;
 }
 
 function openDb(): Promise<IDBDatabase> {

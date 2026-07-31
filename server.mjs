@@ -2,9 +2,12 @@
 
 import Anthropic, { APIError } from "@anthropic-ai/sdk";
 import { createReadStream, existsSync } from "node:fs";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
 import { createServer } from "node:http";
 import { randomBytes } from "node:crypto";
-import { dirname, extname, resolve, sep } from "node:path";
+import { dirname, extname, join, resolve, sep } from "node:path";
+import { homedir, platform } from "node:os";
 import { fileURLToPath } from "node:url";
 
 const host = "127.0.0.1";
@@ -16,6 +19,12 @@ const maxBodyBytes = 2 * 1024 * 1024;
 const localUserId = "local-anthropic-user";
 const localUserEmail = "Local Anthropic key";
 const sessions = new Map();
+const localStoreNames = new Set(["projects", "mcpServers"]);
+const localDataFile = resolveLocalDataFile();
+const keychainService = "Raddus Canvas Anthropic API Key";
+const keychainAccount = localUserId;
+let memoryApiKey = null;
+let localDataWriteQueue = Promise.resolve();
 const appDir = dirname(fileURLToPath(import.meta.url));
 const distDir = resolve(appDir, "dist");
 const bareAnthropicRoutes = new Set(["agents", "deployments", "environments", "messages", "sessions", "skills", "vaults"]);
@@ -80,15 +89,20 @@ async function handleApi(req, res, url) {
     return;
   }
   if (url.pathname === "/api/auth/session" && req.method === "GET") {
-    getSession(req);
+    await ensureSession(req, res);
     sendJson(res, 200, authPayload());
     return;
   }
   if (url.pathname === "/api/auth/logout" && req.method === "POST") {
     const sessionId = readSessionId(req);
     if (sessionId) sessions.delete(sessionId);
+    await clearStoredApiKey();
     setSessionCookie(res, "", 0);
     sendJson(res, 200, { ok: true });
+    return;
+  }
+  if (url.pathname.startsWith("/api/local-store/")) {
+    await handleLocalStore(req, res, url);
     return;
   }
   if (url.pathname.startsWith("/api/anthropic/")) {
@@ -102,21 +116,72 @@ async function handleLogin(req, res) {
   const apiKey = parseApiKey(req);
   const client = createAnthropicClient(apiKey);
   await client.models.list({ limit: 1 });
-  const sessionId = randomBytes(32).toString("base64url");
-  const now = Date.now();
-  sessions.set(sessionId, { apiKey, createdAt: now, lastSeenAt: now });
-  setSessionCookie(res, sessionId, sessionMaxAgeSeconds);
+  await writeStoredApiKey(apiKey);
+  const session = createServerSession(apiKey);
+  setSessionCookie(res, session.id, sessionMaxAgeSeconds);
   sendJson(res, 200, authPayload());
 }
 
 async function handleAnthropic(req, res, url) {
-  const session = getSession(req);
+  const session = await ensureSession(req, res);
   const client = createAnthropicClient(session.apiKey);
   const path = url.pathname.slice("/api/anthropic".length);
   const segments = path.split("/").filter(Boolean).map((segment) => decodeURIComponent(segment));
   const body = req.method === "GET" || req.method === "HEAD" ? undefined : await readJsonBody(req);
   const result = await routeAnthropicRequest(client, req.method ?? "GET", segments, body);
   sendJson(res, 200, result);
+}
+
+async function handleLocalStore(req, res, url) {
+  const segments = url.pathname.slice("/api/local-store/".length).split("/").filter(Boolean).map((segment) => decodeURIComponent(segment));
+  const [resource, id] = segments;
+
+  if (resource === "import" && req.method === "POST" && segments.length === 1) {
+    const body = asPayload(await readJsonBody(req));
+    const data = await updateLocalData((current) => mergeImportedLocalData(current, body));
+    sendJson(res, 200, localStorePayload(data));
+    return;
+  }
+
+  if (resource === "settings") {
+    if (req.method === "GET" && segments.length === 1) {
+      sendJson(res, 200, { settings: (await readLocalData()).settings });
+      return;
+    }
+    if (req.method === "PATCH" && segments.length === 1) {
+      const body = asPayload(await readJsonBody(req));
+      const data = await updateLocalData((current) => ({ ...current, settings: { ...current.settings, ...body } }));
+      sendJson(res, 200, { settings: data.settings });
+      return;
+    }
+  }
+
+  if (localStoreNames.has(resource)) {
+    if (req.method === "GET" && segments.length === 1) {
+      sendJson(res, 200, { records: (await readLocalData())[resource] });
+      return;
+    }
+    if (req.method === "PUT" && id && segments.length === 2) {
+      const body = asPayload(await readJsonBody(req));
+      const record = { ...body, id };
+      const data = await updateLocalData((current) => ({
+        ...current,
+        [resource]: upsertLocalRecord(current[resource], record),
+      }));
+      sendJson(res, 200, { record: data[resource].find((item) => item.id === id) ?? record });
+      return;
+    }
+    if (req.method === "DELETE" && id && segments.length === 2) {
+      const data = await updateLocalData((current) => ({
+        ...current,
+        [resource]: current[resource].filter((record) => record.id !== id),
+      }));
+      sendJson(res, 200, { ok: true, records: data[resource] });
+      return;
+    }
+  }
+
+  throw new HttpError(404, `Unknown local store endpoint: ${req.method} /${segments.join("/")}`);
 }
 
 async function routeAnthropicRequest(client, method, segments, body) {
@@ -181,14 +246,40 @@ function createAnthropicClient(apiKey) {
   });
 }
 
-function getSession(req) {
+async function ensureSession(req, res) {
+  const existing = getExistingSession(req);
+  if (existing) return existing;
+
+  const apiKey = await readStoredApiKey();
+  if (!apiKey) throw new HttpError(401, "Sign in with your Anthropic API key.");
+
+  const session = createServerSession(apiKey);
+  setSessionCookie(res, session.id, sessionMaxAgeSeconds);
+  return session;
+}
+
+function createServerSession(apiKey) {
+  const sessionId = randomBytes(32).toString("base64url");
+  const now = Date.now();
+  const session = { id: sessionId, apiKey, createdAt: now, lastSeenAt: now };
+  sessions.set(sessionId, session);
+  return session;
+}
+
+function getExistingSession(req) {
   const sessionId = readSessionId(req);
   const session = sessionId ? sessions.get(sessionId) : null;
   if (!session || Date.now() - session.lastSeenAt > sessionMaxAgeSeconds * 1000) {
     if (sessionId) sessions.delete(sessionId);
-    throw new HttpError(401, "Sign in with your Anthropic API key.");
+    return null;
   }
   session.lastSeenAt = Date.now();
+  return session;
+}
+
+function getSession(req) {
+  const session = getExistingSession(req);
+  if (!session) throw new HttpError(401, "Sign in with your Anthropic API key.");
   return session;
 }
 
@@ -210,6 +301,135 @@ function authPayload() {
     email: localUserEmail,
     role: "admin",
   };
+}
+
+function resolveLocalDataFile() {
+  if (process.env.RADDUS_CANVAS_DATA_FILE) return resolve(process.env.RADDUS_CANVAS_DATA_FILE);
+  const currentPlatform = platform();
+  if (currentPlatform === "darwin") return join(homedir(), "Library", "Application Support", "Raddus Canvas", "data.json");
+  if (currentPlatform === "win32") return join(process.env.APPDATA ?? homedir(), "Raddus Canvas", "data.json");
+  return join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "raddus-canvas", "data.json");
+}
+
+function defaultLocalData() {
+  return {
+    version: 1,
+    projects: [],
+    mcpServers: [],
+    settings: {},
+  };
+}
+
+async function readLocalData() {
+  try {
+    const text = await readFile(localDataFile, "utf8");
+    return normalizeLocalData(JSON.parse(text));
+  } catch (error) {
+    if (error?.code === "ENOENT") return defaultLocalData();
+    throw error;
+  }
+}
+
+async function updateLocalData(update) {
+  const run = localDataWriteQueue.then(async () => {
+    const current = await readLocalData();
+    const next = normalizeLocalData(await update(current));
+    await writeLocalData(next);
+    return next;
+  });
+  localDataWriteQueue = run.catch(() => undefined);
+  return run;
+}
+
+async function writeLocalData(data) {
+  await mkdir(dirname(localDataFile), { recursive: true });
+  const tempFile = `${localDataFile}.tmp-${process.pid}-${Date.now()}`;
+  await writeFile(tempFile, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
+  await rename(tempFile, localDataFile);
+}
+
+function normalizeLocalData(value) {
+  const record = value && typeof value === "object" ? value : {};
+  return {
+    version: 1,
+    projects: Array.isArray(record.projects) ? record.projects.filter(isLocalRecord) : [],
+    mcpServers: Array.isArray(record.mcpServers) ? record.mcpServers.filter(isLocalRecord) : [],
+    settings: record.settings && typeof record.settings === "object" && !Array.isArray(record.settings) ? record.settings : {},
+  };
+}
+
+function mergeImportedLocalData(current, body) {
+  const imported = normalizeLocalData(body);
+  return {
+    ...current,
+    projects: mergeLocalRecords(current.projects, imported.projects),
+    mcpServers: mergeLocalRecords(current.mcpServers, imported.mcpServers),
+    settings: { ...imported.settings, ...current.settings },
+  };
+}
+
+function localStorePayload(data) {
+  return {
+    projects: data.projects,
+    mcpServers: data.mcpServers,
+    settings: data.settings,
+  };
+}
+
+function isLocalRecord(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value) && typeof value.id === "string" && value.id.trim());
+}
+
+function upsertLocalRecord(records, record) {
+  const nextRecord = { ...record, id: String(record.id) };
+  const index = records.findIndex((item) => item.id === nextRecord.id);
+  if (index < 0) return [...records, nextRecord];
+  return records.map((item, itemIndex) => (itemIndex === index ? nextRecord : item));
+}
+
+function mergeLocalRecords(current, imported) {
+  let next = [...current];
+  for (const record of imported) {
+    if (!next.some((item) => item.id === record.id)) next = [...next, record];
+  }
+  return next;
+}
+
+async function readStoredApiKey() {
+  if (platform() !== "darwin") return memoryApiKey;
+  const result = await runSecurity(["find-generic-password", "-a", keychainAccount, "-s", keychainService, "-w"], { allowMissing: true });
+  return result ? result.trim() || null : null;
+}
+
+async function writeStoredApiKey(apiKey) {
+  if (platform() !== "darwin") {
+    memoryApiKey = apiKey;
+    return;
+  }
+  await runSecurity(["add-generic-password", "-a", keychainAccount, "-s", keychainService, "-w", apiKey, "-U"]);
+}
+
+async function clearStoredApiKey() {
+  memoryApiKey = null;
+  if (platform() !== "darwin") return;
+  await runSecurity(["delete-generic-password", "-a", keychainAccount, "-s", keychainService], { allowMissing: true });
+}
+
+function runSecurity(args, options = {}) {
+  return new Promise((resolveRun, rejectRun) => {
+    execFile("security", args, { encoding: "utf8" }, (error, stdout, stderr) => {
+      const message = `${stdout ?? ""}${stderr ?? ""}`;
+      if (error) {
+        if (options.allowMissing && /could not be found|The specified item could not be found|SecKeychainSearchCopyNext/.test(message)) {
+          resolveRun("");
+          return;
+        }
+        rejectRun(new HttpError(500, `macOS Keychain operation failed: ${String(stderr || error.message).trim()}`));
+        return;
+      }
+      resolveRun(stdout ?? "");
+    });
+  });
 }
 
 function assertLocalRequest(req) {
