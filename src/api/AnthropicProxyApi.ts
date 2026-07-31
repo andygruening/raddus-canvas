@@ -40,6 +40,10 @@ export class AnthropicProxyApi {
     return this.request(`/environments/${encodeURIComponent(environmentId)}`, jsonInit("PATCH", payload));
   }
 
+  async deleteEnvironment(environmentId: string): Promise<unknown> {
+    return this.request(`/environments/${encodeURIComponent(environmentId)}`, jsonInit("DELETE"));
+  }
+
   async listDeployments(): Promise<unknown[]> {
     return this.request("/deployments");
   }

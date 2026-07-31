@@ -131,6 +131,7 @@ async function routeAnthropicRequest(client, method, segments, body) {
     if (method === "GET" && segments.length === 1) return collect(client.beta.environments.list({ limit: 100 }));
     if (method === "POST" && segments.length === 1) return client.beta.environments.create(asPayload(body));
     if (method === "PATCH" && id && segments.length === 2) return client.beta.environments.update(id, asPayload(body));
+    if (method === "DELETE" && id && segments.length === 2) return client.beta.environments.delete(id);
   }
   if (resource === "deployments") {
     if (method === "GET" && segments.length === 1) return collect(client.beta.deployments.list({ limit: 100 }));

@@ -642,6 +642,15 @@ a:focus-visible {
   overflow: hidden;
 }
 
+.modal.resource-details-modal {
+  width: min(680px, calc(100vw - 48px));
+  height: min(720px, calc(100vh - 48px));
+  max-height: min(720px, calc(100vh - 48px));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
 .modal.side {
   width: min(720px, 100%);
   max-height: 100vh;
@@ -714,6 +723,37 @@ a:focus-visible {
   display: grid;
   gap: 14px;
   padding: 0 30px 30px;
+}
+
+.resource-details-layout {
+  min-height: 0;
+  height: 100%;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+
+.resource-details-scroll {
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  padding: 0 20px 20px;
+}
+
+.resource-details-actions {
+  padding: 14px 20px;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--surface-bg);
+}
+
+.resource-details-modal .modal-header {
+  min-height: 58px;
+}
+
+.resource-details-modal .code-input {
+  min-height: 240px;
+  resize: vertical;
 }
 
 .project-node.readonly {
@@ -1488,6 +1528,138 @@ button.canvas-review-integration-tile:hover {
   padding: 0;
 }
 
+.project-resource-picker {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.project-resource-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.project-resource-picker-head > span {
+  color: var(--secondary-text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.project-resource-tile-list {
+  max-height: 260px;
+  overflow-y: auto;
+  display: grid;
+  gap: 8px;
+  padding-right: 4px;
+}
+
+.project-resource-tile {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--button-height) var(--button-height);
+  gap: 8px;
+  align-items: center;
+  padding: 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--card-radius);
+  background: var(--surface-bg);
+}
+
+.project-resource-tile.selected {
+  border-color: var(--brand-border);
+  background: var(--brand-surface);
+}
+
+.project-resource-select {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--primary-text);
+  text-align: left;
+}
+
+.project-resource-select:disabled {
+  background: transparent;
+  border-color: transparent;
+}
+
+.project-resource-check {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--secondary-button-border);
+  border-radius: var(--badge-radius);
+  background: var(--surface-bg);
+  color: transparent;
+}
+
+.project-resource-tile.selected .project-resource-check {
+  border-color: var(--brand-hover);
+  background: var(--brand-hover);
+  color: #fff;
+}
+
+.project-resource-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.project-resource-copy strong,
+.project-resource-copy small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-resource-copy strong {
+  color: var(--primary-text);
+  font-size: 13px;
+}
+
+.project-resource-copy small {
+  color: var(--secondary-text);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.project-resource-action,
+.project-resource-remove {
+  width: var(--button-height);
+  padding: 0;
+}
+
+.resource-package-list {
+  display: grid;
+  gap: 8px;
+}
+
+.resource-package-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.resource-package-row strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--primary-text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .form-section {
   padding: 16px;
   border: 1px solid var(--border-subtle);
@@ -1643,6 +1815,39 @@ textarea:focus {
 
 .canvas-control-group .icon-button {
   border-radius: 999px;
+}
+
+.setup-warning-label {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  z-index: 11;
+  transform: translateX(-50%);
+  max-width: calc(100% - 360px);
+  min-height: var(--button-height);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px 6px 10px;
+  border: 1px solid color-mix(in srgb, #b7791f 34%, var(--surface-bg));
+  border-radius: 999px;
+  background: color-mix(in srgb, #f6e7c4 70%, var(--surface-bg));
+  color: #7a4a0a;
+  box-shadow: var(--popover-shadow);
+  font-size: 13px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.setup-warning-label > svg {
+  flex: 0 0 auto;
+}
+
+.setup-warning-label .compact-button {
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 12px;
 }
 
 .project-select {
@@ -1858,11 +2063,12 @@ textarea:focus {
 }
 
 .project-node.mcp {
-  width: 72px;
-  height: 72px;
+  width: 148px;
+  height: 56px;
   min-height: 0;
-  place-items: center;
-  padding: 8px;
+  align-items: center;
+  gap: 0;
+  padding: 8px 10px;
   border-radius: var(--card-radius);
 }
 
@@ -1986,21 +2192,36 @@ textarea:focus {
 
 .mcp-node-icon {
   position: relative;
-  width: 50px;
-  height: 50px;
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
   display: grid;
   place-items: center;
   overflow: hidden;
-  border-radius: 8px;
+  border-radius: 7px;
   color: var(--secondary-text);
+}
+
+.mcp-node-body {
+  min-width: 0;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mcp-node-name {
+  flex: 1;
+  color: var(--primary-text);
+  font-weight: 800;
 }
 
 .mcp-node-warning {
   position: absolute;
-  top: 0;
-  right: 0;
-  width: 20px;
-  height: 20px;
+  top: -4px;
+  right: -4px;
+  width: 16px;
+  height: 16px;
   display: grid;
   place-items: center;
   border: 1px solid color-mix(in srgb, #b7791f 42%, var(--surface-bg));
@@ -4330,6 +4551,12 @@ textarea:focus {
     min-height: 520px;
   }
 
+  .setup-warning-label {
+    top: 72px;
+    max-width: calc(100% - 32px);
+    white-space: normal;
+  }
+
   .chat-history-layout {
     grid-template-columns: 1fr;
   }
@@ -4505,6 +4732,20 @@ textarea:focus {
     width: 100%;
     max-height: calc(100vh - 20px);
     border-radius: var(--modal-radius) var(--modal-radius) 0 0;
+  }
+
+  .modal.resource-details-modal {
+    width: 100%;
+    height: calc(100vh - 20px);
+    max-height: calc(100vh - 20px);
+  }
+
+  .resource-details-scroll {
+    padding: 0 14px 14px;
+  }
+
+  .resource-details-actions {
+    padding: 12px 14px;
   }
 
   .form-grid.two {

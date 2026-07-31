@@ -1,4 +1,5 @@
 import React from "react";
+import { createPortal } from "react-dom";
 import { createRoot } from "react-dom/client";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -376,6 +377,7 @@ interface ProjectRecord {
   is_public: boolean;
   anthropic_environment_id?: string | null;
   anthropic_vault_id?: string | null;
+  vault_ids?: string[];
   current_user_role?: "owner" | "editor" | "viewer";
   created_at: string;
   updated_at: string;
@@ -518,7 +520,6 @@ const agentModelOptions = [
 function App() {
   const [auth, setAuth] = React.useState<AuthSession | null>(null);
   const [authLoading, setAuthLoading] = React.useState(true);
-  const [routeProjectId, setRouteProjectId] = React.useState(() => readProjectIdFromPath());
   const [agents, setAgents] = React.useState<AgentRecord[]>([]);
   const [query, setQuery] = React.useState("");
   const [selectedAgent, setSelectedAgent] = React.useState<AgentRecord | null>(null);
@@ -622,8 +623,13 @@ function App() {
   const agentsRef = React.useRef<AgentRecord[]>([]);
   const mcpServersRef = React.useRef<RegisteredMcpServer[]>([]);
   const skillsRef = React.useRef<SkillRecord[]>([]);
-  const routeProjectIdRef = React.useRef(routeProjectId);
   const agentConnectorUpdateQueuesRef = React.useRef<Record<string, Promise<void>>>({});
+
+  React.useEffect(() => {
+    removeProjectPathFromUrl();
+    window.addEventListener("popstate", removeProjectPathFromUrl);
+    return () => window.removeEventListener("popstate", removeProjectPathFromUrl);
+  }, []);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -649,18 +655,6 @@ function App() {
     skillsRef.current = skills;
   }, [skills]);
 
-  React.useEffect(() => {
-    routeProjectIdRef.current = routeProjectId;
-  }, [routeProjectId]);
-
-  React.useEffect(() => {
-    function syncRouteProjectId() {
-      setRouteProjectId(readProjectIdFromPath());
-    }
-    window.addEventListener("popstate", syncRouteProjectId);
-    return () => window.removeEventListener("popstate", syncRouteProjectId);
-  }, []);
-
   const loadProjects = React.useCallback(async () => {
     if (!auth) return;
 
@@ -671,8 +665,7 @@ function App() {
       setProjects(response.projects);
       setSelectedProjectId((current) => {
         const stored = readStoredSelectedProjectId();
-        const pathProjectId = routeProjectIdRef.current;
-        return response.projects.find((project) => project.id === pathProjectId)?.id ?? response.projects.find((project) => project.id === current)?.id ?? response.projects.find((project) => project.id === stored)?.id ?? response.projects[0]?.id ?? "";
+        return response.projects.find((project) => project.id === current)?.id ?? response.projects.find((project) => project.id === stored)?.id ?? response.projects[0]?.id ?? "";
       });
     } catch (loadError) {
       setProjectsError(errorMessage(loadError));
@@ -699,11 +692,7 @@ function App() {
 
   React.useEffect(() => {
     storeSelectedProjectId(selectedProjectId);
-    if (auth && selectedProjectId) {
-      replaceProjectPath(selectedProjectId);
-      setRouteProjectId(selectedProjectId);
-    }
-  }, [auth, selectedProjectId]);
+  }, [selectedProjectId]);
 
   const loadAgents = React.useCallback(async (): Promise<AgentRecord[]> => {
     if (!auth) return agentsRef.current;
@@ -876,7 +865,7 @@ function App() {
 
   const selectedProject = projects.find((project) => project.id === selectedProjectId) ?? projects[0] ?? null;
   const selectedProjectCanEdit = selectedProject ? canEditProject(selectedProject) : true;
-  const selectedProjectVaultIds = React.useMemo(() => projectVaultIds(selectedProject, vaults), [selectedProject?.anthropic_vault_id, selectedProject?.id, vaults]);
+  const selectedProjectVaultIds = React.useMemo(() => projectVaultIds(selectedProject, vaults), [selectedProject?.anthropic_vault_id, selectedProject?.id, selectedProject?.vault_ids, vaults]);
   const selectedProjectVaultId = selectedProjectVaultIds[0] ?? "";
 
   const runtimeVaults = React.useMemo(
@@ -956,7 +945,7 @@ function App() {
     setSessionsLoading(true);
     try {
       const response = await apiFetch<{ sessions: ManagedSession[] }>("/sessions", auth);
-      setSessions(response.sessions);
+      setSessions(latestSessionsFirst(response.sessions));
     } catch (loadError) {
       setChatError(errorMessage(loadError));
       if (isUnauthorized(loadError)) {
@@ -1159,6 +1148,7 @@ function App() {
   async function saveProject(project: ProjectRecord) {
     if (!auth) return;
 
+    const vaultIds = projectVaultIds(project, vaults);
     setProjectSaving(true);
     setProjectsError(null);
     try {
@@ -1167,7 +1157,9 @@ function App() {
         body: JSON.stringify({
           name: project.name,
           graph: project.graph,
-          anthropic_vault_id: project.anthropic_vault_id ?? null,
+          anthropic_environment_id: project.anthropic_environment_id ?? null,
+          anthropic_vault_id: vaultIds[0] ?? null,
+          vault_ids: vaultIds,
         }),
       });
       setProjects((current) => current.map((item) => (item.id === response.project.id ? response.project : item)));
@@ -1504,17 +1496,18 @@ function App() {
     }
   }
 
-  async function createEnvironment(payload: JsonObject) {
-    if (!auth) return;
+  async function createEnvironment(payload: JsonObject): Promise<AnthropicEnvironment | null> {
+    if (!auth) return null;
 
     setEnvironmentSaving(true);
     setEnvironmentError(null);
     try {
-      await apiFetch<{ environment: AnthropicEnvironment }>("/environments", auth, {
+      const response = await apiFetch<{ environment: AnthropicEnvironment }>("/environments", auth, {
         method: "POST",
         body: JSON.stringify(payload),
       });
       await loadEnvironments();
+      return response.environment;
     } catch (createError) {
       setEnvironmentError(errorMessage(createError));
       throw createError;
@@ -1537,6 +1530,26 @@ function App() {
     } catch (updateError) {
       setEnvironmentError(errorMessage(updateError));
       throw updateError;
+    } finally {
+      setEnvironmentSaving(false);
+    }
+  }
+
+  async function deleteEnvironment(environmentId: string) {
+    if (!auth) return;
+
+    setEnvironmentSaving(true);
+    setEnvironmentError(null);
+    try {
+      await apiFetch<{ environment: unknown }>(`/environments/${encodeURIComponent(environmentId)}`, auth, { method: "DELETE" });
+      setSelectedEnvironment((current) => (current?.id === environmentId ? null : current));
+      setProjects((current) => current.map((project) => (
+        project.anthropic_environment_id === environmentId ? { ...project, anthropic_environment_id: null } : project
+      )));
+      await loadEnvironments();
+    } catch (deleteError) {
+      setEnvironmentError(errorMessage(deleteError));
+      throw deleteError;
     } finally {
       setEnvironmentSaving(false);
     }
@@ -2085,22 +2098,85 @@ function App() {
     }
   }
 
-  async function createVault(payload: { display_name: string }) {
-    if (!auth) return;
+  async function createVault(payload: { display_name: string }): Promise<VaultRecord | null> {
+    if (!auth) return null;
 
     setVaultSaving(true);
     setVaultsError(null);
     try {
-      await apiFetch<{ vault: VaultRecord }>("/vaults", auth, {
+      const response = await apiFetch<{ vault: VaultRecord }>("/vaults", auth, {
         method: "POST",
         body: JSON.stringify(payload),
       });
       await loadVaults();
+      return response.vault;
     } catch (createError) {
       setVaultsError(errorMessage(createError));
       throw createError;
     } finally {
       setVaultSaving(false);
+    }
+  }
+
+  async function createAndSelectProjectVault(project: ProjectRecord, payload?: { display_name?: string; vault_ids?: string[] }): Promise<VaultRecord | null> {
+    if (!auth) return null;
+
+    setProjectSaving(true);
+    setProjectsError(null);
+    try {
+      const displayName = payload?.display_name?.trim() || defaultProjectVaultName(project);
+      const vault = await createVault({ display_name: displayName });
+      if (!vault) return null;
+      const vaultIds = uniqueStrings([...(payload?.vault_ids ?? projectVaultIds(project, vaults)), vault.id]);
+      const response = await apiFetch<{ project: ProjectRecord }>(`/projects/${encodeURIComponent(project.id)}`, auth, {
+        method: "PATCH",
+        body: JSON.stringify({
+          name: project.name,
+          graph: project.graph,
+          anthropic_environment_id: project.anthropic_environment_id ?? null,
+          anthropic_vault_id: vaultIds[0] ?? null,
+          vault_ids: vaultIds,
+        }),
+      });
+      setProjects((current) => current.map((item) => (item.id === response.project.id ? response.project : item)));
+      return vault;
+    } catch (createError) {
+      setProjectsError(errorMessage(createError));
+      throw createError;
+    } finally {
+      setProjectSaving(false);
+    }
+  }
+
+  async function createAndSelectProjectEnvironment(project: ProjectRecord, payload?: JsonObject): Promise<AnthropicEnvironment | null> {
+    if (!auth) return null;
+
+    setProjectSaving(true);
+    setProjectsError(null);
+    try {
+      const environment = await createEnvironment(payload ?? {
+        name: defaultProjectEnvironmentName(project),
+        config: defaultEnvironmentConfig("cloud"),
+      });
+      if (!environment) return null;
+      const vaultIds = projectVaultIds(project, vaults);
+      const response = await apiFetch<{ project: ProjectRecord }>(`/projects/${encodeURIComponent(project.id)}`, auth, {
+        method: "PATCH",
+        body: JSON.stringify({
+          name: project.name,
+          graph: project.graph,
+          anthropic_environment_id: environment.id,
+          anthropic_vault_id: vaultIds[0] ?? null,
+          vault_ids: vaultIds,
+        }),
+      });
+      setProjects((current) => current.map((item) => (item.id === response.project.id ? response.project : item)));
+      return environment;
+    } catch (createError) {
+      setProjectsError(errorMessage(createError));
+      throw createError;
+    } finally {
+      setProjectSaving(false);
     }
   }
 
@@ -2127,6 +2203,7 @@ function App() {
   async function deleteVault(vaultId: string) {
     if (!auth) return;
 
+    setVaultSaving(true);
     setVaultsError(null);
     try {
       await apiFetch<{ vault: unknown }>(`/vaults/${encodeURIComponent(vaultId)}`, auth, { method: "DELETE" });
@@ -2143,6 +2220,9 @@ function App() {
       await loadVaults();
     } catch (deleteError) {
       setVaultsError(errorMessage(deleteError));
+      throw deleteError;
+    } finally {
+      setVaultSaving(false);
     }
   }
 
@@ -2190,6 +2270,11 @@ function App() {
               emailReceivers={projectEmailReceivers}
               integrations={integrations}
               environments={environments}
+              environmentLoading={environmentLoading}
+              environmentSaving={environmentSaving}
+              vaults={runtimeVaults}
+              vaultsLoading={vaultsLoading}
+              vaultSaving={vaultSaving}
               selectedVaultIds={selectedProjectVaultIds}
               selectedVaultCredentials={selectedProjectVaultId ? (credentialsByVault[selectedProjectVaultId] ?? []) : []}
               selectedVaultCredentialsLoading={selectedProjectVaultId ? credentialsLoadingByVault[selectedProjectVaultId] === true : false}
@@ -2265,6 +2350,8 @@ function App() {
                 setIntegrationInstallOpen(true);
               }}
               onOpenReview={() => setCanvasReviewOpen(true)}
+              onCreateProjectEnvironment={createAndSelectProjectEnvironment}
+              onCreateProjectVault={createAndSelectProjectVault}
               onSignOut={() => setConfirmSignOutOpen(true)}
               createdAgentPlacement={createdCanvasAgentPlacement}
               onCreatedAgentPlacementConsumed={() => setCreatedCanvasAgentPlacement(null)}
@@ -2277,10 +2364,22 @@ function App() {
         <Modal title="Project settings" onClose={() => setProjectSettingsPageOpen(false)} plainHeader>
           <ProjectSettingsView
             project={selectedProject}
+            environments={environments}
             vaults={vaults}
+            credentialsByVault={credentialsByVault}
+            credentialsLoadingByVault={credentialsLoadingByVault}
             saving={projectSaving}
+            environmentSaving={environmentSaving}
+            vaultSaving={vaultSaving}
             error={projectsError}
             onSave={saveProject}
+            onUpdateEnvironment={updateEnvironment}
+            onCreateEnvironment={createAndSelectProjectEnvironment}
+            onDeleteEnvironment={deleteEnvironment}
+            onLoadVaultCredentials={loadVaultCredentials}
+            onCreateVault={createAndSelectProjectVault}
+            onDeleteVault={deleteVault}
+            onDeleteVaultCredential={deleteVaultCredential}
             onDelete={(project) => {
               void deleteProject(project);
               setProjectSettingsPageOpen(false);
@@ -2602,6 +2701,11 @@ function ProjectsView({
   emailReceivers,
   integrations,
   environments,
+  environmentLoading,
+  environmentSaving,
+  vaults,
+  vaultsLoading,
+  vaultSaving,
   selectedVaultIds,
   selectedVaultCredentials,
   selectedVaultCredentialsLoading,
@@ -2643,6 +2747,8 @@ function ProjectsView({
   onOpenSettings,
   onOpenIntegrationLibrary,
   onOpenReview,
+  onCreateProjectEnvironment,
+  onCreateProjectVault,
   onSignOut,
   createdAgentPlacement,
   onCreatedAgentPlacementConsumed,
@@ -2656,6 +2762,11 @@ function ProjectsView({
   emailReceivers: EmailReceiverRecord[];
   integrations: IntegrationRecord[];
   environments: AnthropicEnvironment[];
+  environmentLoading: boolean;
+  environmentSaving: boolean;
+  vaults: VaultRecord[];
+  vaultsLoading: boolean;
+  vaultSaving: boolean;
   selectedVaultIds: string[];
   selectedVaultCredentials: VaultCredential[];
   selectedVaultCredentialsLoading: boolean;
@@ -2697,6 +2808,8 @@ function ProjectsView({
   onOpenSettings: () => void;
   onOpenIntegrationLibrary: () => void;
   onOpenReview: () => void;
+  onCreateProjectEnvironment: (project: ProjectRecord, payload?: JsonObject) => Promise<AnthropicEnvironment | null>;
+  onCreateProjectVault: (project: ProjectRecord, payload?: { display_name?: string; vault_ids?: string[] }) => Promise<VaultRecord | null>;
   onSignOut: () => void;
   createdAgentPlacement: { projectId: string; agentId: string; x: number; y: number; nonce: number } | null;
   onCreatedAgentPlacementConsumed: () => void;
@@ -2741,11 +2854,18 @@ function ProjectsView({
     } else if (selectedProject) {
       setDraft((current) => {
         if (!current || current.id !== selectedProject.id) return current;
-        if (current.name === selectedProject.name && (current.anthropic_vault_id ?? null) === (selectedProject.anthropic_vault_id ?? null)) return current;
+        if (
+          current.name === selectedProject.name &&
+          (current.anthropic_environment_id ?? null) === (selectedProject.anthropic_environment_id ?? null) &&
+          (current.anthropic_vault_id ?? null) === (selectedProject.anthropic_vault_id ?? null) &&
+          stringArraysEqual(projectVaultIds(current, []), projectVaultIds(selectedProject, []))
+        ) return current;
         return {
           ...current,
           name: selectedProject.name,
+          anthropic_environment_id: selectedProject.anthropic_environment_id ?? null,
           anthropic_vault_id: selectedProject.anthropic_vault_id ?? null,
+          vault_ids: projectVaultIds(selectedProject, []),
         };
       });
     }
@@ -2772,9 +2892,38 @@ function ProjectsView({
   const canEditCurrentProject = draft ? canEditProject(draft) : false;
   const sessionsById = React.useMemo(() => new Map(sessions.map((session) => [session.id, session])), [sessions]);
   const projectEnvironment = selectedProject ? environmentForProject(selectedProject, environments) : null;
+  const vaultSetupMissing = !vaultsLoading && vaults.length === 0;
+  const environmentSetupMissing = !environmentLoading && environments.length === 0;
+  const setupWarningText = environmentSetupMissing && vaultSetupMissing
+    ? "Create an environment and vault to finish setup."
+    : environmentSetupMissing
+      ? "Create an environment to run agents."
+      : vaultSetupMissing
+        ? "Create a vault to store secrets."
+        : "";
+
+  function fixMissingSetup() {
+    if (!draft) return;
+    void (async () => {
+      let projectForSetup = draft;
+      if (environmentSetupMissing) {
+        const environment = await onCreateProjectEnvironment(projectForSetup);
+        if (environment) projectForSetup = { ...projectForSetup, anthropic_environment_id: environment.id };
+      }
+      if (vaultSetupMissing) {
+        await onCreateProjectVault(projectForSetup);
+      }
+    })().catch(() => undefined);
+  }
 
   React.useEffect(() => {
-    const sessionIds = [...new Set(graph.nodes.flatMap((node) => node.session_ids ?? []))];
+    const triggerNodes = graph.nodes.filter((node) => ["play", "schedule", "slack", "api", "email"].includes(node.type));
+    const sessionIds = [...new Set(triggerNodes.flatMap((node) =>
+      connectedAgentIdsForTrigger(node.id).flatMap((agentId) => {
+        const session = sessionsForTrigger(node.id).find((candidate) => candidate.agent.id === agentId);
+        return session ? [session.id] : [];
+      }),
+    ))];
     if (sessionIds.length === 0) {
       setStatusBySessionId((current) => (Object.keys(current).length === 0 ? current : {}));
       return;
@@ -2789,7 +2938,7 @@ function ProjectsView({
       if (!cancelled) setStatusBySessionId({});
     });
     return () => { cancelled = true; };
-  }, [graph.nodes, onLoadSessionMessages]);
+  }, [graph.nodes, graph.edges, sessions, onLoadSessionMessages]);
 
   React.useEffect(() => {
     if (!draft || !canEditCurrentProject) return;
@@ -3159,9 +3308,7 @@ function ProjectsView({
 
   function statusForTriggerEdge(source: ProjectNode, target: ProjectNode): { status: ConnectionStatus; label: string; sessionId?: string } | null {
     if (!target.agent_id || !["play", "schedule", "slack", "api", "email"].includes(source.type)) return null;
-    const sessionId = [...(source.session_ids ?? [])]
-      .reverse()
-      .find((id) => sessionsById.get(id)?.agent.id === target.agent_id);
+    const sessionId = sessionsForTrigger(source.id).find((session) => session.agent.id === target.agent_id)?.id;
     const update = sessionId ? statusBySessionId[sessionId] : null;
     if (update) return { status: update.status, label: `${update.agent}: ${update.status} — ${update.message}`, sessionId };
     return {
@@ -3175,7 +3322,7 @@ function ProjectsView({
     const trigger = graph.nodes.find((node) => node.id === nodeId);
     const sessionIds = new Set(trigger?.session_ids ?? []);
     const connectedAgentIds = new Set(connectedAgentIdsForTrigger(nodeId));
-    return sessions.filter((session) => sessionIds.has(session.id) || connectedAgentIds.has(session.agent.id));
+    return latestSessionsFirst(sessions.filter((session) => sessionIds.has(session.id) || connectedAgentIds.has(session.agent.id)));
   }
 
   async function runPlay(node: ProjectNode) {
@@ -3593,6 +3740,21 @@ function ProjectsView({
                 </button>
               </div>
             </div>
+            {setupWarningText ? (
+              <div className="setup-warning-label" onPointerDown={(event) => event.stopPropagation()}>
+                <TriangleAlert size={16} aria-hidden="true" />
+                <span>{setupWarningText}</span>
+                <button
+                  className="secondary-button compact-button"
+                  type="button"
+                  onClick={fixMissingSetup}
+                  disabled={!canEditCurrentProject || projectSaving || environmentSaving || vaultSaving}
+                >
+                  {environmentSaving || vaultSaving || projectSaving ? <Loader2 className="spin" size={14} aria-hidden="true" /> : null}
+                  Fix
+                </button>
+              </div>
+            ) : null}
             <div className={canvasActionStackOpen ? "project-workspace-overlay expanded" : "project-workspace-overlay"}>
               <button
                 className="icon-button project-workspace-button project-workspace-menu-button"
@@ -3895,6 +4057,7 @@ function ProjectNodeCard({
   const apiTrigger = node.api_trigger ?? createDefaultApiTriggerDraft(apiKeys);
   const emailTrigger = node.email_trigger ?? createDefaultEmailTriggerDraft(emailReceivers);
   const mcpMissingInstall = node.type === "mcp" && mcpInstallStatus === "missing";
+  const mcpName = mcpServer?.name ?? shortId(node.mcp_server_id ?? node.id);
 
   return (
     <article
@@ -3981,13 +4144,16 @@ function ProjectNodeCard({
           {!agent ? <small>Missing agent</small> : null}
         </>
       ) : node.type === "mcp" ? (
-        <div className="mcp-node-icon" title={mcpServer?.name ?? shortId(node.mcp_server_id ?? node.id)}>
-          <McpServerIcon server={mcpServer} fallbackSize={34} />
-          {mcpMissingInstall ? (
-            <span className="mcp-node-warning" title="Install this MCP credential in the selected project vault" aria-label="MCP credential missing">
-              <TriangleAlert size={15} aria-hidden="true" />
-            </span>
-          ) : null}
+        <div className="mcp-node-body" title={mcpName}>
+          <div className="mcp-node-icon">
+            <McpServerIcon server={mcpServer} fallbackSize={24} />
+            {mcpMissingInstall ? (
+              <span className="mcp-node-warning" title="Install this MCP credential in the selected project vault" aria-label="MCP credential missing">
+                <TriangleAlert size={12} aria-hidden="true" />
+              </span>
+            ) : null}
+          </div>
+          <strong className="mcp-node-name">{mcpName}</strong>
         </div>
       ) : node.type === "skill" ? (
         <div className="skill-node-body" title={skill?.display_title ?? shortId(node.skill_id ?? node.id)}>
@@ -5039,10 +5205,19 @@ function PlaySessionsPanel({
   const [message, setMessage] = React.useState("");
   const [sending, setSending] = React.useState(false);
   const [sendError, setSendError] = React.useState<string | null>(null);
-  const selectedSession = sessions.find((session) => session.id === selectedSessionId) ?? null;
+  const sortedSessions = React.useMemo(() => latestSessionsFirst(sessions), [sessions]);
+  const latestSession = sortedSessions[0] ?? null;
+  const selectedSession = sortedSessions.find((session) => session.id === selectedSessionId) ?? null;
+  const selectedSessionValue = selectedSession?.id ?? latestSession?.id ?? "";
   const canStopSelectedSession = isStoppableSession(selectedSession);
   const stoppingSelectedSession = selectedSession ? stoppingSessionId === selectedSession.id : false;
   const statusUpdates = React.useMemo(() => parseSessionMessageStatusUpdates(messages), [messages]);
+
+  React.useEffect(() => {
+    if (sessionsLoading || sortedSessions.length === 0) return;
+    if (selectedSessionId && sortedSessions.some((session) => session.id === selectedSessionId)) return;
+    onSelect(sortedSessions[0].id);
+  }, [onSelect, selectedSessionId, sessionsLoading, sortedSessions]);
 
   React.useEffect(() => {
     if (!selectedSession) setDetailsOpen(false);
@@ -5082,9 +5257,8 @@ function PlaySessionsPanel({
         <div className="trigger-session-select-row">
           <label>
             <span>Session</span>
-            <select value={selectedSessionId} onChange={(event) => onSelect(event.target.value)} disabled={sessions.length === 0}>
-              <option value="">Select session</option>
-              {sessions.map((session) => (
+            <select value={selectedSessionValue} onChange={(event) => onSelect(event.target.value)} disabled={sortedSessions.length === 0}>
+              {sortedSessions.map((session) => (
                 <option value={session.id} key={session.id}>
                   {session.agent.name} · {formatDateTime(session.updated_at)}
                 </option>
@@ -5113,7 +5287,7 @@ function PlaySessionsPanel({
           </button>
         </div>
         {tab === "chat" ? (
-          <ChatMessageList messages={messages} loading={loading} emptyText="Select a session to view its messages." />
+          <ChatMessageList messages={messages} loading={loading} emptyText={sortedSessions.length === 0 ? "No sessions for connected agents." : "No messages for this session yet."} />
         ) : (
           <div className="status-update-history" aria-live="polite">
             {loading ? (
@@ -5138,7 +5312,7 @@ function PlaySessionsPanel({
             ) : (
               <div className="chat-placeholder">
                 <Info size={24} aria-hidden="true" />
-                <span>{selectedSessionId ? "No status updates for this session yet." : "Select a session to view its status updates."}</span>
+                <span>{sortedSessions.length === 0 ? "No sessions for connected agents." : "No status updates for this session yet."}</span>
               </div>
             )}
           </div>
@@ -5150,9 +5324,9 @@ function PlaySessionsPanel({
           <textarea
             value={message}
             onChange={(event) => setMessage(event.target.value)}
-            placeholder={selectedSessionId ? "Message this session" : "Select a session to send a message"}
+            placeholder={selectedSessionValue ? "Message this session" : "No session available"}
             rows={2}
-            disabled={!selectedSessionId || sending}
+            disabled={!selectedSessionValue || sending}
           />
           <div className="chat-compose-actions">
             {canStopSelectedSession ? (
@@ -5161,7 +5335,7 @@ function PlaySessionsPanel({
                 Stop
               </button>
             ) : null}
-            <button className="primary-button" type="submit" disabled={!selectedSessionId || !message.trim() || sending}>
+            <button className="primary-button" type="submit" disabled={!selectedSessionValue || !message.trim() || sending}>
               {sending ? <Loader2 className="spin" size={16} aria-hidden="true" /> : <Send size={16} aria-hidden="true" />}
               Send
             </button>
@@ -5264,8 +5438,16 @@ function SessionMetric({ label, value, emphasis }: { label: string; value: strin
 }
 
 function ChatMessageList({ messages, loading, emptyText }: { messages: ChatMessage[]; loading: boolean; emptyText: string }) {
+  const historyRef = React.useRef<HTMLDivElement | null>(null);
+
+  React.useEffect(() => {
+    const history = historyRef.current;
+    if (!history) return;
+    history.scrollTop = history.scrollHeight;
+  }, [messages, loading]);
+
   return (
-    <div className="message-history" aria-live="polite">
+    <div className="message-history" ref={historyRef} aria-live="polite">
       {messages.length === 0 ? (
         <div className="chat-placeholder">
           <MessageSquare size={24} aria-hidden="true" />
@@ -5348,9 +5530,16 @@ function ChatView({
   onCreateAgent: () => void;
 }) {
   const [settingsOpen, setSettingsOpen] = React.useState(false);
+  const historyRef = React.useRef<HTMLDivElement | null>(null);
   const selectedSession = sessions.find((session) => session.id === selectedSessionId) ?? null;
   const canStopSelectedSession = isStoppableSession(selectedSession);
   const stoppingSelectedSession = selectedSession ? stoppingSessionId === selectedSession.id : false;
+
+  React.useEffect(() => {
+    const history = historyRef.current;
+    if (!history) return;
+    history.scrollTop = history.scrollHeight;
+  }, [messages, loading]);
 
   return (
     <section className="chat-view">
@@ -5424,7 +5613,7 @@ function ChatView({
                 </div>
               </aside>
 
-              <div className="message-history" aria-live="polite">
+              <div className="message-history" ref={historyRef} aria-live="polite">
                 {messages.length === 0 ? (
                   <div className="chat-placeholder">
                     <MessageSquare size={24} aria-hidden="true" />
@@ -6446,48 +6635,174 @@ function canvasReviewIntegrationRequirements(
 
 function ProjectSettingsView({
   project,
+  environments,
   vaults,
+  credentialsByVault,
+  credentialsLoadingByVault,
   saving,
+  environmentSaving,
+  vaultSaving,
   error,
   onSave,
+  onUpdateEnvironment,
+  onCreateEnvironment,
+  onDeleteEnvironment,
+  onLoadVaultCredentials,
+  onCreateVault,
+  onDeleteVault,
+  onDeleteVaultCredential,
   onDelete,
 }: {
   project: ProjectRecord;
+  environments: AnthropicEnvironment[];
   vaults: VaultRecord[];
+  credentialsByVault: Record<string, VaultCredential[]>;
+  credentialsLoadingByVault: Record<string, boolean>;
   saving: boolean;
+  environmentSaving: boolean;
+  vaultSaving: boolean;
   error: string | null;
-  onSave: (project: ProjectRecord) => void;
+  onSave: (project: ProjectRecord) => void | Promise<void>;
+  onUpdateEnvironment: (environmentId: string, payload: JsonObject) => Promise<void>;
+  onCreateEnvironment: (project: ProjectRecord, payload?: JsonObject) => Promise<AnthropicEnvironment | null>;
+  onDeleteEnvironment: (environmentId: string) => Promise<void>;
+  onLoadVaultCredentials: (vaultId: string) => Promise<void>;
+  onCreateVault: (project: ProjectRecord, payload?: { display_name?: string; vault_ids?: string[] }) => Promise<VaultRecord | null>;
+  onDeleteVault: (vaultId: string) => Promise<void>;
+  onDeleteVaultCredential: (vaultId: string, credentialId: string) => Promise<void>;
   onDelete: (project: ProjectRecord) => void;
 }) {
   const [name, setName] = React.useState(project.name);
-  const [vaultId, setVaultId] = React.useState(projectVaultId(project, vaults));
+  const [environmentId, setEnvironmentId] = React.useState(projectEnvironmentId(project, environments));
+  const [vaultIds, setVaultIds] = React.useState<string[]>(projectVaultIds(project, vaults));
+  const [environmentCreateOpen, setEnvironmentCreateOpen] = React.useState(false);
+  const [environmentDetails, setEnvironmentDetails] = React.useState<AnthropicEnvironment | null>(null);
+  const [environmentToDelete, setEnvironmentToDelete] = React.useState<AnthropicEnvironment | null>(null);
+  const [vaultCreateOpen, setVaultCreateOpen] = React.useState(false);
+  const [vaultDetails, setVaultDetails] = React.useState<VaultRecord | null>(null);
+  const [vaultToDelete, setVaultToDelete] = React.useState<VaultRecord | null>(null);
 
   React.useEffect(() => {
     setName(project.name);
-    setVaultId(projectVaultId(project, vaults));
-  }, [project.id, project.name, project.anthropic_vault_id]);
+    setEnvironmentId(projectEnvironmentId(project, environments));
+    setVaultIds(projectVaultIds(project, vaults));
+  }, [project.id, project.name, project.anthropic_environment_id, project.anthropic_vault_id, project.vault_ids, environments, vaults]);
 
   React.useEffect(() => {
-    const currentVaultValid = vaults.some((vault) => vault.id === vaultId);
-    if (vaults.length === 0) {
-      if (vaultId) setVaultId("");
+    const currentEnvironmentValid = environments.some((environment) => environment.id === environmentId);
+    if (environments.length === 0) {
+      if (environmentId) setEnvironmentId("");
       return;
     }
-    if (!vaultId || !currentVaultValid) {
-      setVaultId(projectVaultId(project, vaults));
+    if (!environmentId || !currentEnvironmentValid) {
+      setEnvironmentId(projectEnvironmentId(project, environments));
     }
-  }, [project, vaultId, vaults]);
+  }, [environmentId, environments, project]);
+
+  React.useEffect(() => {
+    const availableVaultIds = new Set(vaults.map((vault) => vault.id));
+    setVaultIds((current) => current.filter((vaultId) => availableVaultIds.has(vaultId)));
+  }, [vaults]);
 
   const canEdit = canEditProject(project);
-  const currentVaultId = projectVaultId(project, vaults);
-  const dirty = name.trim() !== project.name || vaultId !== currentVaultId;
+  const currentEnvironmentId = projectEnvironmentId(project, environments);
+  const currentVaultIds = projectVaultIds(project, vaults);
+  const dirty = name.trim() !== project.name || environmentId !== currentEnvironmentId || !stringArraysEqual(vaultIds, currentVaultIds);
+
+  function projectWithSettings(nextVaultIds = vaultIds, nextEnvironmentId = environmentId): ProjectRecord {
+    const selectedVaultIds = uniqueStrings(nextVaultIds);
+    return {
+      ...project,
+      name: name.trim() || project.name,
+      anthropic_environment_id: nextEnvironmentId || null,
+      anthropic_vault_id: selectedVaultIds[0] ?? null,
+      vault_ids: selectedVaultIds,
+      is_public: false,
+    };
+  }
 
   function submit(event: React.FormEvent) {
     event.preventDefault();
     if (!canEdit) return;
     const trimmedName = name.trim();
     if (!trimmedName) return;
-    onSave({ ...project, name: trimmedName, anthropic_vault_id: vaultId || null, is_public: false });
+    onSave({ ...projectWithSettings(), name: trimmedName });
+  }
+
+  function selectEnvironment(nextEnvironmentId: string) {
+    if (!canEdit || saving) return;
+    setEnvironmentId(nextEnvironmentId);
+  }
+
+  async function createEnvironmentForProject(payload: JsonObject) {
+    if (!canEdit || saving || environmentSaving) return;
+    try {
+      const environment = await onCreateEnvironment(projectWithSettings(), payload);
+      if (environment) setEnvironmentId(environment.id);
+      setEnvironmentCreateOpen(false);
+    } catch {
+      // Errors are surfaced by the owning project/environment state.
+    }
+  }
+
+  async function deleteSelectedEnvironment() {
+    if (!environmentToDelete || saving || environmentSaving) return;
+    const deletedEnvironmentId = environmentToDelete.id;
+    const nextEnvironmentId = environmentId === deletedEnvironmentId
+      ? environments.find((environment) => environment.id !== deletedEnvironmentId)?.id ?? ""
+      : environmentId;
+    try {
+      await onDeleteEnvironment(deletedEnvironmentId);
+      setEnvironmentId(nextEnvironmentId);
+      if (environmentId === deletedEnvironmentId || project.anthropic_environment_id === deletedEnvironmentId) {
+        await onSave(projectWithSettings(vaultIds, nextEnvironmentId));
+      }
+      setEnvironmentToDelete(null);
+    } catch {
+      // Errors are surfaced by the owning project/environment state.
+    }
+  }
+
+  function openVaultDetails(vault: VaultRecord) {
+    setVaultDetails(vault);
+    if (!credentialsByVault[vault.id] && !credentialsLoadingByVault[vault.id]) {
+      void onLoadVaultCredentials(vault.id);
+    }
+  }
+
+  function toggleVault(vaultId: string) {
+    if (!canEdit || saving) return;
+    setVaultIds((current) => (
+      current.includes(vaultId)
+        ? current.filter((selectedVaultId) => selectedVaultId !== vaultId)
+        : [...current, vaultId]
+    ));
+  }
+
+  async function createVaultForProject(payload: { display_name: string }) {
+    if (!canEdit || saving || vaultSaving) return;
+    try {
+      const baseProject = projectWithSettings();
+      const vault = await onCreateVault(baseProject, { ...payload, vault_ids: baseProject.vault_ids ?? [] });
+      if (vault) setVaultIds((current) => uniqueStrings([...current, vault.id]));
+      setVaultCreateOpen(false);
+    } catch {
+      // Errors are surfaced by the owning project/vault state.
+    }
+  }
+
+  async function deleteSelectedVault() {
+    if (!vaultToDelete || saving || vaultSaving) return;
+    const deletedVaultId = vaultToDelete.id;
+    const nextVaultIds = vaultIds.filter((vaultId) => vaultId !== deletedVaultId);
+    try {
+      await onDeleteVault(deletedVaultId);
+      setVaultIds(nextVaultIds);
+      await onSave(projectWithSettings(nextVaultIds));
+      setVaultToDelete(null);
+    } catch {
+      // Errors are surfaced by the owning project/vault state.
+    }
   }
 
   return (
@@ -6500,17 +6815,131 @@ function ProjectSettingsView({
             <span>Name</span>
             <input value={name} onChange={(event) => setName(event.target.value)} disabled={!canEdit} required />
           </label>
-          <label>
-            <span>Anthropic vault</span>
-            <select value={vaultId} onChange={(event) => setVaultId(event.target.value)} disabled={!canEdit || vaults.length === 0}>
-              {vaults.length === 0 ? <option value="">No vaults available</option> : null}
-              {vaults.map((vault) => (
-                <option value={vault.id} key={vault.id}>
-                  {vault.display_name}
-                </option>
-              ))}
-            </select>
-          </label>
+          <div className="project-resource-picker">
+            <div className="project-resource-picker-head">
+              <span>Anthropic environment</span>
+              <button
+                className="secondary-button compact-button"
+                type="button"
+                onClick={() => setEnvironmentCreateOpen(true)}
+                disabled={!canEdit || saving || environmentSaving}
+              >
+                {environmentSaving ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <Plus size={15} aria-hidden="true" />}
+                Add environment
+              </button>
+            </div>
+            <div className="project-resource-tile-list" role="radiogroup" aria-label="Anthropic environments">
+              {environments.length === 0 ? (
+                <div className="vault-selector-empty">No environments available</div>
+              ) : (
+                environments.map((environment) => {
+                  const selected = environmentId === environment.id;
+                  return (
+                    <article className={selected ? "project-resource-tile selected" : "project-resource-tile"} key={environment.id}>
+                      <button
+                        className="project-resource-select"
+                        type="button"
+                        onClick={() => selectEnvironment(environment.id)}
+                        disabled={!canEdit || saving}
+                        role="radio"
+                        aria-checked={selected}
+                      >
+                        <span className="project-resource-check" aria-hidden="true">
+                          {selected ? <Check size={15} /> : null}
+                        </span>
+                        <span className="project-resource-copy">
+                          <strong>{environment.name}</strong>
+                          <small>{environment.config.type} · {environmentPackageSummary(environment) || environment.description || environment.id}</small>
+                        </span>
+                      </button>
+                      <button
+                        className="icon-button project-resource-action"
+                        type="button"
+                        onClick={() => setEnvironmentDetails(environment)}
+                        disabled={saving}
+                        title={`View ${environment.name} details`}
+                        aria-label={`View ${environment.name} details`}
+                      >
+                        <Info size={16} aria-hidden="true" />
+                      </button>
+                      <button
+                        className="icon-button project-resource-remove"
+                        type="button"
+                        onClick={() => setEnvironmentToDelete(environment)}
+                        disabled={!canEdit || saving || environmentSaving}
+                        title={`Delete ${environment.name}`}
+                        aria-label={`Delete ${environment.name}`}
+                      >
+                        <Trash2 size={16} aria-hidden="true" />
+                      </button>
+                    </article>
+                  );
+                })
+              )}
+            </div>
+          </div>
+          <div className="project-resource-picker">
+            <div className="project-resource-picker-head">
+              <span>Anthropic vaults</span>
+              <button
+                className="secondary-button compact-button"
+                type="button"
+                onClick={() => setVaultCreateOpen(true)}
+                disabled={!canEdit || saving || vaultSaving}
+              >
+                {vaultSaving ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <Plus size={15} aria-hidden="true" />}
+                Add vault
+              </button>
+            </div>
+            <div className="project-resource-tile-list" role="group" aria-label="Anthropic vaults">
+              {vaults.length === 0 ? (
+                <div className="vault-selector-empty">No vaults available</div>
+              ) : (
+                vaults.map((vault) => {
+                  const selected = vaultIds.includes(vault.id);
+                  return (
+                    <article className={selected ? "project-resource-tile selected" : "project-resource-tile"} key={vault.id}>
+                      <button
+                        className="project-resource-select"
+                        type="button"
+                        onClick={() => toggleVault(vault.id)}
+                        disabled={!canEdit || saving}
+                        aria-pressed={selected}
+                      >
+                        <span className="project-resource-check" aria-hidden="true">
+                          {selected ? <Check size={15} /> : null}
+                        </span>
+                        <span className="project-resource-copy">
+                          <strong>{vault.display_name}</strong>
+                          <small>{vaultScopeLabel(vault)} · {vault.id}</small>
+                        </span>
+                      </button>
+                      <button
+                        className="icon-button project-resource-action"
+                        type="button"
+                        onClick={() => openVaultDetails(vault)}
+                        disabled={saving}
+                        title={`View ${vault.display_name} details`}
+                        aria-label={`View ${vault.display_name} details`}
+                      >
+                        <Info size={16} aria-hidden="true" />
+                      </button>
+                      <button
+                        className="icon-button project-resource-remove"
+                        type="button"
+                        onClick={() => setVaultToDelete(vault)}
+                        disabled={!canEdit || saving || vaultSaving || !vault.can_delete_vault}
+                        title={vault.can_delete_vault ? `Delete ${vault.display_name}` : "This vault cannot be deleted"}
+                        aria-label={`Delete ${vault.display_name}`}
+                      >
+                        <Trash2 size={16} aria-hidden="true" />
+                      </button>
+                    </article>
+                  );
+                })
+              )}
+            </div>
+          </div>
         </FormSection>
         <div className="dialog-actions">
           <button className="danger-button" type="button" onClick={() => onDelete(project)} disabled={saving || !canEdit}>
@@ -6523,6 +6952,61 @@ function ProjectSettingsView({
           </button>
         </div>
       </form>
+      {environmentCreateOpen ? (
+        <CreateProjectEnvironmentDialog
+          saving={environmentSaving}
+          onClose={() => setEnvironmentCreateOpen(false)}
+          onCreate={createEnvironmentForProject}
+        />
+      ) : null}
+      {environmentDetails ? (
+        <EnvironmentDetailsDialog
+          environment={environmentDetails}
+          saving={environmentSaving}
+          onClose={() => setEnvironmentDetails(null)}
+          onSave={async (payload) => {
+            await onUpdateEnvironment(environmentDetails.id, payload);
+            setEnvironmentDetails(null);
+          }}
+        />
+      ) : null}
+      {environmentToDelete ? (
+        <ConfirmDialog
+          title="Delete environment"
+          message={`Delete "${environmentToDelete.name}"? Project runs using this environment will need another environment selected.`}
+          confirmLabel="Delete"
+          danger
+          onCancel={() => setEnvironmentToDelete(null)}
+          onConfirm={() => void deleteSelectedEnvironment()}
+        />
+      ) : null}
+      {vaultCreateOpen ? (
+        <CreateVaultDialog
+          saving={vaultSaving}
+          onClose={() => setVaultCreateOpen(false)}
+          onCreate={createVaultForProject}
+        />
+      ) : null}
+      {vaultDetails ? (
+        <VaultDetailsDialog
+          vault={vaultDetails}
+          credentials={credentialsByVault[vaultDetails.id] ?? []}
+          loading={credentialsLoadingByVault[vaultDetails.id] === true}
+          onRefresh={() => onLoadVaultCredentials(vaultDetails.id)}
+          onClose={() => setVaultDetails(null)}
+          onDeleteCredential={(credentialId) => onDeleteVaultCredential(vaultDetails.id, credentialId)}
+        />
+      ) : null}
+      {vaultToDelete ? (
+        <ConfirmDialog
+          title="Delete vault"
+          message={`Delete "${vaultToDelete.display_name}"? Stored credentials in this vault will no longer be available.`}
+          confirmLabel="Delete"
+          danger
+          onCancel={() => setVaultToDelete(null)}
+          onConfirm={() => void deleteSelectedVault()}
+        />
+      ) : null}
     </section>
   );
 }
@@ -7009,7 +7493,7 @@ function CreateVaultDialog({
         <FormSection title="Basics">
           <label>
             <span>Name</span>
-            <input value={name} onChange={(event) => setName(event.target.value)} required />
+            <input value={name} onChange={(event) => setName(event.target.value)} required autoFocus />
           </label>
         </FormSection>
         {formError ? <div className="notice error">{formError}</div> : null}
@@ -7024,6 +7508,240 @@ function CreateVaultDialog({
           </button>
         </div>
       </form>
+    </Modal>
+  );
+}
+
+function CreateProjectEnvironmentDialog({
+  saving,
+  onClose,
+  onCreate,
+}: {
+  saving: boolean;
+  onClose: () => void;
+  onCreate: (payload: JsonObject) => Promise<void>;
+}) {
+  const [name, setName] = React.useState("");
+  const [formError, setFormError] = React.useState<string | null>(null);
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setFormError(null);
+
+    try {
+      const trimmedName = name.trim();
+      if (!trimmedName) throw new Error("Environment name is required.");
+      await onCreate({
+        name: trimmedName,
+        config: defaultEnvironmentConfig("cloud"),
+      });
+    } catch (submitError) {
+      setFormError(errorMessage(submitError));
+    }
+  }
+
+  return (
+    <Modal title="Create environment" onClose={onClose}>
+      <form className="form-grid" onSubmit={submit}>
+        <FormSection title="Basics">
+          <label>
+            <span>Name</span>
+            <input value={name} onChange={(event) => setName(event.target.value)} required autoFocus />
+          </label>
+        </FormSection>
+        {formError ? <div className="notice error">{formError}</div> : null}
+        <div className="dialog-actions">
+          <button className="secondary-button" type="button" onClick={onClose}>
+            <X size={16} aria-hidden="true" />
+            Cancel
+          </button>
+          <button className="primary-button" type="submit" disabled={saving || !name.trim()}>
+            {saving ? <Loader2 className="spin" size={16} aria-hidden="true" /> : <Plus size={16} aria-hidden="true" />}
+            Create
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function EnvironmentDetailsDialog({
+  environment,
+  saving,
+  onClose,
+  onSave,
+}: {
+  environment: AnthropicEnvironment;
+  saving: boolean;
+  onClose: () => void;
+  onSave: (payload: JsonObject) => Promise<void>;
+}) {
+  const [spec, setSpec] = React.useState(formatJson(environment.config));
+  const [formError, setFormError] = React.useState<string | null>(null);
+  const packageRows = environmentPackageRowsFromSpec(spec);
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setFormError(null);
+
+    try {
+      const config = parseJsonObject(spec, "Spec file");
+      await onSave({
+        name: environment.name,
+        description: environment.description,
+        config,
+        metadata: environment.metadata,
+        scope: environment.scope,
+      });
+    } catch (submitError) {
+      setFormError(errorMessage(submitError));
+    }
+  }
+
+  return (
+    <Modal title="Environment details" onClose={onClose} className="resource-details-modal">
+      <form className="resource-details-layout" onSubmit={submit}>
+        <div className="resource-details-scroll">
+          <FormSection title={environment.name}>
+            <div className="details-info-grid">
+              <InfoRow icon={<MonitorCog size={15} aria-hidden="true" />} label="Type" value={environment.config.type} />
+              <InfoRow icon={<Shield size={15} aria-hidden="true" />} label="Scope" value={environment.scope ?? "account"} />
+              <InfoRow icon={<Calendar size={15} aria-hidden="true" />} label="Updated" value={formatDateTime(environment.updated_at)} />
+            </div>
+          </FormSection>
+
+          <FormSection title="Packages">
+            {packageRows.length === 0 ? (
+              <div className="structured-empty">No packages configured in the spec file</div>
+            ) : (
+              <div className="resource-package-list">
+                {packageRows.map(({ manager, packages }) => (
+                  <div className="resource-package-row" key={manager}>
+                    <span className="owner-chip">{manager}</span>
+                    <strong>{packages.join(", ")}</strong>
+                  </div>
+                ))}
+              </div>
+            )}
+          </FormSection>
+
+          <FormSection title="Spec file">
+            <JsonEditor label="Environment config" value={spec} onChange={setSpec} rows={10} disabled={saving} />
+          </FormSection>
+
+          {formError ? <div className="notice error">{formError}</div> : null}
+        </div>
+
+        <div className="dialog-actions resource-details-actions">
+          <button className="secondary-button" type="button" onClick={onClose} disabled={saving}>
+            <X size={16} aria-hidden="true" />
+            Close
+          </button>
+          <button className="primary-button" type="submit" disabled={saving}>
+            {saving ? <Loader2 className="spin" size={16} aria-hidden="true" /> : <Save size={16} aria-hidden="true" />}
+            Save spec
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function VaultDetailsDialog({
+  vault,
+  credentials,
+  loading,
+  onRefresh,
+  onClose,
+  onDeleteCredential,
+}: {
+  vault: VaultRecord;
+  credentials: VaultCredential[];
+  loading: boolean;
+  onRefresh: () => Promise<void>;
+  onClose: () => void;
+  onDeleteCredential: (credentialId: string) => Promise<void>;
+}) {
+  const [credentialToDelete, setCredentialToDelete] = React.useState<VaultCredential | null>(null);
+  const [removingCredentialId, setRemovingCredentialId] = React.useState<string | null>(null);
+
+  async function deleteSelectedCredential() {
+    if (!credentialToDelete || removingCredentialId) return;
+    setRemovingCredentialId(credentialToDelete.id);
+    try {
+      await onDeleteCredential(credentialToDelete.id);
+      setCredentialToDelete(null);
+    } finally {
+      setRemovingCredentialId(null);
+    }
+  }
+
+  return (
+    <Modal title="Vault details" onClose={onClose} className="resource-details-modal">
+      <div className="resource-details-layout">
+        <div className="resource-details-scroll">
+          <FormSection title={vault.display_name}>
+            <div className="details-info-grid">
+              <InfoRow icon={<KeyRound size={15} aria-hidden="true" />} label="Scope" value={vaultScopeLabel(vault)} />
+              <InfoRow icon={<Calendar size={15} aria-hidden="true" />} label="Updated" value={formatDateTime(vault.updated_at)} />
+              <InfoRow icon={<Info size={15} aria-hidden="true" />} label="Vault ID" value={vault.id} />
+            </div>
+          </FormSection>
+
+          <FormSection title="Secrets">
+            <div className="credential-panel-head">
+              <span>{loading ? "Loading secrets" : `${credentials.length} secrets`}</span>
+              <button className="icon-button" type="button" onClick={() => void onRefresh()} disabled={loading} title="Refresh secrets">
+                {loading ? <Loader2 className="spin" size={16} aria-hidden="true" /> : <RefreshCw size={16} aria-hidden="true" />}
+              </button>
+            </div>
+            {loading ? (
+              <div className="structured-empty">
+                <Loader2 className="spin" size={16} aria-hidden="true" />
+                Loading secrets
+              </div>
+            ) : credentials.length === 0 ? (
+              <div className="structured-empty">No secrets in this vault</div>
+            ) : (
+              <div className="credential-list">
+                {credentials.map((credential) => (
+                  <div className="credential-row" key={credential.id}>
+                    <span className="agent-name-cell">
+                      <strong>{credential.display_name || credential.id}</strong>
+                      <small>{credentialAuthLabel(credential.auth)}</small>
+                    </span>
+                    <span className="numeric-cell">{formatDate(credential.updated_at)}</span>
+                    {vault.can_delete_credentials ? (
+                      <button className="danger-button compact-button" type="button" onClick={() => setCredentialToDelete(credential)} disabled={removingCredentialId === credential.id}>
+                        {removingCredentialId === credential.id ? <Loader2 className="spin" size={15} aria-hidden="true" /> : <Trash2 size={15} aria-hidden="true" />}
+                        Remove
+                      </button>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            )}
+          </FormSection>
+        </div>
+
+        <div className="dialog-actions resource-details-actions">
+          <button className="secondary-button" type="button" onClick={onClose}>
+            <X size={16} aria-hidden="true" />
+            Close
+          </button>
+        </div>
+      </div>
+
+      {credentialToDelete ? (
+        <ConfirmDialog
+          title="Remove secret"
+          message={`Remove "${credentialToDelete.display_name || credentialToDelete.id}" from ${vault.display_name}?`}
+          confirmLabel="Remove"
+          danger
+          onCancel={() => setCredentialToDelete(null)}
+          onConfirm={() => void deleteSelectedCredential()}
+        />
+      ) : null}
     </Modal>
   );
 }
@@ -9170,7 +9888,7 @@ function Modal({
 
   const className = `${side ? `modal side ${entered ? "entered" : ""}` : wide ? "modal wide" : "modal"}${extraClassName ? ` ${extraClassName}` : ""}`;
   const backdropClassName = side ? `modal-backdrop side-backdrop ${entered ? "entered" : ""}` : "modal-backdrop";
-  return (
+  return createPortal(
     <div className={backdropClassName} role="presentation" onMouseDown={onClose}>
       <section className={className} role="dialog" aria-modal="true" aria-label={title} onMouseDown={(event) => event.stopPropagation()}>
         <header className={plainHeader ? "modal-header plain" : "modal-header"}>
@@ -9187,7 +9905,8 @@ function Modal({
         </header>
         {children}
       </section>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -9307,6 +10026,9 @@ async function apiFetch<T>(path: string, auth: AuthSession, init: RequestInit = 
   const environmentMatch = /^\/environments\/([^/]+)$/.exec(path);
   if (environmentMatch && method === "PATCH") {
     return { environment: normalizeEnvironment((await anthropic.updateEnvironment(decodeURIComponent(environmentMatch[1]), body)) as JsonObject) } as T;
+  }
+  if (environmentMatch && method === "DELETE") {
+    return { environment: await anthropic.deleteEnvironment(decodeURIComponent(environmentMatch[1])) } as T;
   }
 
   if (path === "/deployments" && method === "GET") {
@@ -9849,7 +10571,13 @@ async function localProjectById(projectId: string): Promise<ProjectRecord> {
 
 function withoutProjectDescription(project: ProjectRecord): ProjectRecord {
   const { description: _description, ...projectWithoutDescription } = project as ProjectRecord & { description?: unknown };
-  return projectWithoutDescription;
+  const vaultIds = projectVaultIds(projectWithoutDescription, []);
+  const shouldAttachVaultIds = hasExplicitProjectVaultIds(projectWithoutDescription) || Boolean(projectWithoutDescription.anthropic_vault_id);
+  return {
+    ...projectWithoutDescription,
+    anthropic_vault_id: vaultIds[0] ?? projectWithoutDescription.anthropic_vault_id ?? null,
+    ...(shouldAttachVaultIds ? { vault_ids: vaultIds } : {}),
+  };
 }
 
 async function localAgentRecordsForReview(anthropic: AnthropicProxyApi): Promise<AgentRecord[]> {
@@ -10462,15 +11190,26 @@ function parseRequestBody(body: BodyInit | null | undefined): unknown {
 async function listLocalProjects(anthropic: AnthropicProxyApi): Promise<ProjectRecord[]> {
   const projects = (await localCanvasStore.listProjects<ProjectRecord>()).map(withoutProjectDescription);
   const defaultVaultId = await firstAvailableAnthropicVaultId(anthropic);
-  if (!defaultVaultId) return projects;
+  const defaultEnvironmentId = await firstAvailableAnthropicEnvironmentId(anthropic);
+  if (!defaultVaultId && !defaultEnvironmentId) return projects;
   let changed = false;
   const nextProjects = projects.map((project) => {
-    if (project.anthropic_vault_id) return project;
-    changed = true;
-    return { ...project, anthropic_vault_id: defaultVaultId };
+    let nextProject = project;
+    if (defaultEnvironmentId && !project.anthropic_environment_id) {
+      changed = true;
+      nextProject = { ...nextProject, anthropic_environment_id: defaultEnvironmentId };
+    }
+    if (defaultVaultId && !hasExplicitProjectVaultIds(project) && !project.anthropic_vault_id) {
+      changed = true;
+      nextProject = { ...nextProject, anthropic_vault_id: defaultVaultId, vault_ids: [defaultVaultId] };
+    }
+    return nextProject;
   });
   if (changed) {
-    await Promise.all(nextProjects.filter((project) => !projects.find((current) => current.id === project.id)?.anthropic_vault_id).map((project) => localCanvasStore.saveProject(project)));
+    await Promise.all(nextProjects.filter((project) => {
+      const current = projects.find((candidate) => candidate.id === project.id);
+      return current && JSON.stringify(projectEditableShape(current)) !== JSON.stringify(projectEditableShape(project));
+    }).map((project) => localCanvasStore.saveProject(project)));
   }
   return nextProjects;
 }
@@ -10478,13 +11217,19 @@ async function listLocalProjects(anthropic: AnthropicProxyApi): Promise<ProjectR
 async function createLocalProject(anthropic: AnthropicProxyApi, body: unknown): Promise<ProjectRecord> {
   const value = isRecord(body) ? body : {};
   const now = new Date().toISOString();
+  const requestedVaultIds = uniqueStrings(stringArray(value.vault_ids).map((vaultId) => vaultId.trim()).filter(Boolean));
+  const fallbackVaultId = nullableStringValue(value.anthropic_vault_id) ?? nullableStringValue(value.vault_id) ?? await firstAvailableAnthropicVaultId(anthropic);
+  const vaultIds = requestedVaultIds.length > 0 ? requestedVaultIds : fallbackVaultId ? [fallbackVaultId] : [];
+  const environmentId = nullableStringValue(value.anthropic_environment_id) ?? nullableStringValue(value.environment_id) ?? await firstAvailableAnthropicEnvironmentId(anthropic);
   return {
     id: crypto.randomUUID(),
     name: typeof value.name === "string" && value.name.trim() ? value.name.trim() : "Untitled project",
     creator_uuid: localUserId,
     graph: isProjectGraph(value.graph) ? value.graph : createDefaultProjectGraph(),
     is_public: false,
-    anthropic_vault_id: nullableStringValue(value.anthropic_vault_id) ?? nullableStringValue(value.vault_id) ?? await firstAvailableAnthropicVaultId(anthropic),
+    anthropic_environment_id: environmentId,
+    anthropic_vault_id: vaultIds[0] ?? null,
+    vault_ids: vaultIds,
     current_user_role: "owner",
     created_at: now,
     updated_at: now,
@@ -10497,13 +11242,26 @@ async function updateLocalProject(projectId: string, body: unknown): Promise<Pro
   if (!existing) throw new ApiError("Project not found.", 404);
   const value = isRecord(body) ? body : {};
   const projectWithoutDescription = withoutProjectDescription(existing);
+  const hasVaultIds = Object.prototype.hasOwnProperty.call(value, "vault_ids");
+  const nextVaultIds = hasVaultIds
+    ? uniqueStrings(stringArray(value.vault_ids).map((vaultId) => vaultId.trim()).filter(Boolean))
+    : Object.prototype.hasOwnProperty.call(value, "anthropic_vault_id")
+      ? nullableStringValue(value.anthropic_vault_id)
+        ? [nullableStringValue(value.anthropic_vault_id) as string]
+        : []
+      : projectVaultIds(projectWithoutDescription, []);
+  const nextEnvironmentId = Object.prototype.hasOwnProperty.call(value, "anthropic_environment_id")
+    ? nullableStringValue(value.anthropic_environment_id)
+    : Object.prototype.hasOwnProperty.call(value, "environment_id")
+      ? nullableStringValue(value.environment_id)
+      : projectWithoutDescription.anthropic_environment_id ?? null;
   const next: ProjectRecord = {
     ...projectWithoutDescription,
     name: typeof value.name === "string" && value.name.trim() ? value.name.trim() : existing.name,
     graph: isProjectGraph(value.graph) ? value.graph : existing.graph,
-    anthropic_vault_id: Object.prototype.hasOwnProperty.call(value, "anthropic_vault_id")
-      ? nullableStringValue(value.anthropic_vault_id)
-      : projectWithoutDescription.anthropic_vault_id ?? null,
+    anthropic_environment_id: nextEnvironmentId,
+    anthropic_vault_id: nextVaultIds[0] ?? null,
+    vault_ids: nextVaultIds,
     current_user_role: "owner",
     updated_at: new Date().toISOString(),
   };
@@ -10749,8 +11507,20 @@ async function localAvailableVaults(anthropic: AnthropicProxyApi): Promise<Vault
   }
 }
 
+async function localAvailableEnvironments(anthropic: AnthropicProxyApi): Promise<AnthropicEnvironment[]> {
+  try {
+    return (await anthropic.listEnvironments()).map(normalizeEnvironment).filter((environment) => !environment.archived_at);
+  } catch {
+    return [];
+  }
+}
+
 async function firstAvailableAnthropicVaultId(anthropic: AnthropicProxyApi): Promise<string | null> {
   return (await localAvailableVaults(anthropic))[0]?.id ?? null;
+}
+
+async function firstAvailableAnthropicEnvironmentId(anthropic: AnthropicProxyApi): Promise<string | null> {
+  return (await localAvailableEnvironments(anthropic))[0]?.id ?? null;
 }
 
 async function selectedVaultIdForProjectIds(anthropic: AnthropicProxyApi, projectIds: string[]): Promise<string | null> {
@@ -10761,9 +11531,11 @@ async function selectedVaultIdForProjectIds(anthropic: AnthropicProxyApi, projec
 }
 
 async function selectedVaultIdForProject(anthropic: AnthropicProxyApi, project: ProjectRecord): Promise<string | null> {
-  const vaults = await localAvailableVaults(anthropic);
-  if (project.anthropic_vault_id && vaults.some((vault) => vault.id === project.anthropic_vault_id)) return project.anthropic_vault_id;
-  return vaults[0]?.id ?? project.anthropic_vault_id ?? null;
+  return (await selectedVaultIdsForProject(anthropic, project))[0] ?? null;
+}
+
+async function selectedVaultIdsForProject(anthropic: AnthropicProxyApi, project: ProjectRecord): Promise<string[]> {
+  return projectVaultIds(project, await localAvailableVaults(anthropic));
 }
 
 async function defaultVaultIdsForPayloadProject(anthropic: AnthropicProxyApi, projectId: string | undefined): Promise<string[]> {
@@ -10772,8 +11544,9 @@ async function defaultVaultIdsForPayloadProject(anthropic: AnthropicProxyApi, pr
     return fallbackVaultId ? [fallbackVaultId] : [];
   }
   const project = (await localCanvasStore.listProjects<ProjectRecord>()).find((candidate) => candidate.id === projectId);
-  const vaultId = project ? await selectedVaultIdForProject(anthropic, project) : await firstAvailableAnthropicVaultId(anthropic);
-  return vaultId ? [vaultId] : [];
+  if (project) return selectedVaultIdsForProject(anthropic, project);
+  const fallbackVaultId = await firstAvailableAnthropicVaultId(anthropic);
+  return fallbackVaultId ? [fallbackVaultId] : [];
 }
 
 async function createLocalMcpCredentialIfNeeded(
@@ -11034,9 +11807,9 @@ function normalizeVault(value: unknown): VaultRecord {
   return {
     id,
     archived_at: nullableStringValue(record.archived_at),
-    can_add_credentials: record.can_add_credentials === true,
-    can_delete_credentials: record.can_delete_credentials === true,
-    can_delete_vault: record.can_delete_vault === true,
+    can_add_credentials: record.can_add_credentials !== false,
+    can_delete_credentials: record.can_delete_credentials !== false,
+    can_delete_vault: record.can_delete_vault !== false,
     created_at: stringValue(record.created_at) ?? now,
     display_name: stringValue(record.display_name) ?? stringValue(record.name) ?? id,
     managed_scope: record.managed_scope === "project" || record.managed_scope === "external" ? record.managed_scope : "global",
@@ -11198,10 +11971,9 @@ function readProjectIdFromPath(): string | null {
   return match ? decodeURIComponent(match[1]) : null;
 }
 
-function replaceProjectPath(projectId: string) {
-  const nextPath = `/project/${encodeURIComponent(projectId)}`;
-  if (window.location.pathname === nextPath) return;
-  window.history.replaceState(null, "", `${nextPath}${window.location.search}${window.location.hash}`);
+function removeProjectPathFromUrl() {
+  if (!readProjectIdFromPath()) return;
+  window.history.replaceState(null, "", `/${window.location.search}${window.location.hash}`);
 }
 
 function canEditProject(project: ProjectRecord): boolean {
@@ -11537,19 +12309,60 @@ function cloneProject(project: ProjectRecord): ProjectRecord {
   return JSON.parse(JSON.stringify(project)) as ProjectRecord;
 }
 
-function projectEditableShape(project: ProjectRecord): Pick<ProjectRecord, "name" | "graph" | "anthropic_vault_id"> {
-  return { name: project.name, graph: project.graph, anthropic_vault_id: project.anthropic_vault_id ?? null };
+function projectEditableShape(project: ProjectRecord): Pick<ProjectRecord, "name" | "graph" | "anthropic_environment_id" | "anthropic_vault_id" | "vault_ids"> {
+  const vaultIds = projectVaultIds(project, []);
+  return {
+    name: project.name,
+    graph: project.graph,
+    anthropic_environment_id: project.anthropic_environment_id ?? null,
+    anthropic_vault_id: vaultIds[0] ?? null,
+    vault_ids: vaultIds,
+  };
+}
+
+function projectEnvironmentId(project: ProjectRecord | null | undefined, environments: AnthropicEnvironment[]): string {
+  if (!project) return environments[0]?.id ?? "";
+  if (project.anthropic_environment_id && environments.some((environment) => environment.id === project.anthropic_environment_id)) {
+    return project.anthropic_environment_id;
+  }
+  return environments[0]?.id ?? "";
 }
 
 function projectVaultId(project: ProjectRecord | null | undefined, vaults: VaultRecord[]): string {
-  if (!project) return vaults[0]?.id ?? "";
-  if (project.anthropic_vault_id && vaults.some((vault) => vault.id === project.anthropic_vault_id)) return project.anthropic_vault_id;
-  return vaults[0]?.id ?? project.anthropic_vault_id ?? "";
+  return projectVaultIds(project, vaults)[0] ?? "";
 }
 
 function projectVaultIds(project: ProjectRecord | null | undefined, vaults: VaultRecord[]): string[] {
-  const vaultId = projectVaultId(project, vaults);
-  return vaultId ? [vaultId] : [];
+  if (!project) return vaults[0]?.id ? [vaults[0].id] : [];
+  const explicitVaultIds = hasExplicitProjectVaultIds(project);
+  const selectedVaultIds = explicitVaultIds
+    ? uniqueStrings((project.vault_ids ?? []).map((vaultId) => vaultId.trim()).filter(Boolean))
+    : project.anthropic_vault_id
+      ? [project.anthropic_vault_id]
+      : [];
+  const availableVaultIds = new Set(vaults.map((vault) => vault.id));
+  const validVaultIds = vaults.length > 0 ? selectedVaultIds.filter((vaultId) => availableVaultIds.has(vaultId)) : selectedVaultIds;
+  if (validVaultIds.length > 0 || explicitVaultIds) return validVaultIds;
+  return vaults[0]?.id ? [vaults[0].id] : [];
+}
+
+function hasExplicitProjectVaultIds(project: ProjectRecord): boolean {
+  return Object.prototype.hasOwnProperty.call(project, "vault_ids");
+}
+
+function stringArraysEqual(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) return false;
+  return left.every((value, index) => value === right[index]);
+}
+
+function defaultProjectVaultName(project: ProjectRecord): string {
+  const projectName = project.name.trim();
+  return projectName ? `${projectName} vault` : "Project vault";
+}
+
+function defaultProjectEnvironmentName(project: ProjectRecord): string {
+  const projectName = project.name.trim();
+  return projectName ? `${projectName} environment` : "Project environment";
 }
 
 function projectNodeTypeLabel(type: ProjectNodeType): string {
@@ -11609,7 +12422,7 @@ function connectionPreviewPath(source: ProjectNode, target: { x: number; y: numb
 }
 
 function projectNodeCenter(node: ProjectNode): { x: number; y: number } {
-  if (node.type === "mcp") return { x: node.x + 36, y: node.y + 36 };
+  if (node.type === "mcp") return { x: node.x + 74, y: node.y + 28 };
   if (node.type === "skill") return { x: node.x + 100, y: node.y + 46 };
   if (node.type === "play") return { x: node.x + 130, y: node.y + 72 };
   if (node.type === "agent") return { x: node.x + 90, y: node.y + 44 };
@@ -12359,6 +13172,17 @@ function formatDateTime(value: string): string {
   }).format(new Date(value));
 }
 
+function latestSessionsFirst(sessions: ManagedSession[]): ManagedSession[] {
+  return [...sessions].sort((a, b) => sessionSortTimestamp(b) - sessionSortTimestamp(a));
+}
+
+function sessionSortTimestamp(session: ManagedSession): number {
+  const updatedAt = Date.parse(session.updated_at);
+  if (Number.isFinite(updatedAt)) return updatedAt;
+  const createdAt = Date.parse(session.created_at);
+  return Number.isFinite(createdAt) ? createdAt : 0;
+}
+
 function trimTrailingSlash(value: string): string {
   return value.endsWith("/") ? value.slice(0, -1) : value;
 }
@@ -12592,6 +13416,22 @@ function environmentPackageSummary(environment: AnthropicEnvironment): string {
     return Array.isArray(values) && values.length > 0 ? [`${manager} ${values.length}`] : [];
   });
   return parts.join(" · ");
+}
+
+function environmentPackageRowsFromSpec(spec: string): Array<{ manager: PackageManager; packages: string[] }> {
+  try {
+    const config = parseJsonObject(spec, "Spec file");
+    const packages = isRecord(config.packages) ? config.packages : null;
+    if (!packages) return [];
+    return packageManagers.flatMap((manager) => {
+      const values = packages[manager];
+      return Array.isArray(values) && values.length > 0
+        ? [{ manager, packages: values.map((value) => String(value)) }]
+        : [];
+    });
+  } catch {
+    return [];
+  }
 }
 
 function themeVariables(): React.CSSProperties & Record<`--${string}`, string | number> {
