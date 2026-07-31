@@ -89,8 +89,13 @@ The app still runs code in your browser and uses npm dependencies, so treat it l
 
 Raddus Canvas has two main parts:
 
-- `server.mjs`: a local Node.js server that serves the app, proxies Anthropic API requests, manages the local session, stores the Anthropic API key, and persists local app data.
-- `src/`: a React frontend that renders the canvas, project settings, local auth flow, session UI, and resource management screens.
+- `bin/raddus-canvas.mjs`: the CLI entrypoint used by the published `raddus-canvas` command.
+- `server/`: local Node.js runtime modules that serve the app, proxy Anthropic API requests, manage the local session, store the Anthropic API key, and persist local app data.
+- `server.mjs`: a small compatibility launcher for running the server from the repository root.
+- `src/main.tsx`: the React mount entrypoint.
+- `src/App.tsx`: the frontend app controller and remaining feature views.
+- `src/auth/`, `src/domain/`, and `src/theme/`: extracted frontend feature, domain, and design-token helpers.
+- `src/generated/`: generated frontend support files consumed by the app.
 
 At runtime:
 

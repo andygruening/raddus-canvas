@@ -4,22 +4,24 @@
   "private": false,
   "description": "Raddus Canvas local Anthropic canvas app.",
   "type": "module",
-  "main": "server.mjs",
+  "main": "server/index.mjs",
   "bin": {
-    "raddus-canvas": "./server.mjs"
+    "raddus-canvas": "./bin/raddus-canvas.mjs"
   },
   "files": [
+    "bin",
     "dist",
+    "server",
     "server.mjs",
     "package.json"
   ],
   "scripts": {
     "ensure-deps": "[ -x node_modules/.bin/tsc ] && [ -x node_modules/.bin/vite ] || npm ci",
-    "dev": "npm run ensure-deps && node server.mjs --dev",
+    "dev": "npm run ensure-deps && node bin/raddus-canvas.mjs --dev",
     "build": "npm run ensure-deps && tsc --noEmit && vite build",
     "prepack": "npm run build",
-    "preview": "npm run ensure-deps && node server.mjs",
-    "start": "npm run ensure-deps && node server.mjs"
+    "preview": "npm run ensure-deps && node bin/raddus-canvas.mjs",
+    "start": "npm run ensure-deps && node bin/raddus-canvas.mjs"
   },
   "keywords": [],
   "author": "",
