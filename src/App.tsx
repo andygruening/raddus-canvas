@@ -3548,13 +3548,14 @@ function ProjectsView({
 
             <div className="project-world" style={{ transform: `translate(${camera.x}px, ${camera.y}px) scale(${camera.zoom})` }}>
               <svg className="project-edges" aria-hidden="true">
-                {graph.edges.map((edge) => {
+                {graph.edges.map((edge, edgeIndex) => {
                   const source = graph.nodes.find((node) => node.id === edge.source);
                   const target = graph.nodes.find((node) => node.id === edge.target);
                   if (!source || !target) return null;
                   const path = edgePath(source, target);
                   const status = statusForTriggerEdge(source, target);
                   const statusPoint = edgeStatusPoint(source, target);
+                  const edgeEnterDelayMs = Math.min(edgeIndex * 18 + 70, 260);
                   return (
                     <g key={edge.id}>
                       <path
@@ -3567,11 +3568,12 @@ function ProjectsView({
                           removeEdge(edge.id);
                         }}
                       />
-                      <path className={`project-edge ${edge.type}`} d={path} />
+                      <path className={`project-edge ${edge.type}`} d={path} pathLength={1} style={{ animationDelay: `${edgeEnterDelayMs}ms` }} />
                       {status ? (
                         <g
                           className={`project-edge-status ${status.status}`}
                           transform={`translate(${statusPoint.x} ${statusPoint.y})`}
+                          style={{ animationDelay: `${edgeEnterDelayMs + 120}ms` }}
                           onPointerDown={(event) => event.stopPropagation()}
                           onClick={(event) => {
                             event.stopPropagation();
@@ -3591,7 +3593,7 @@ function ProjectsView({
                 <path className="project-edge-preview" ref={connectionPreviewPathRef} style={{ display: "none" }} />
               </svg>
 
-              {graph.nodes.map((node) => {
+              {graph.nodes.map((node, nodeIndex) => {
                 const connectingFrom = connectingFromId ? graph.nodes.find((item) => item.id === connectingFromId) : undefined;
                 const connectionState =
                   connectingFrom && connectingFrom.id === node.id
@@ -3646,6 +3648,7 @@ function ProjectsView({
                     runningPlay={runningPlayNodeId === node.id}
                     readOnly={!canEditCurrentProject}
                     shouldSuppressClick={suppressesNodeClick}
+                    enterDelayMs={Math.min(nodeIndex * 24, 180)}
                   />
                 );
               })}
@@ -3777,6 +3780,7 @@ function ProjectNodeCard({
   runningPlay,
   readOnly,
   shouldSuppressClick,
+  enterDelayMs,
 }: {
   node: ProjectNode;
   agents: AgentRecord[];
@@ -3809,6 +3813,7 @@ function ProjectNodeCard({
   runningPlay: boolean;
   readOnly: boolean;
   shouldSuppressClick: () => boolean;
+  enterDelayMs: number;
 }) {
   const agent = node.agent_id ? agents.find((record) => record.id === node.agent_id) : undefined;
   const mcpServer = node.mcp_server_id ? mcpServers.find((server) => server.id === node.mcp_server_id) : undefined;
@@ -3822,8 +3827,8 @@ function ProjectNodeCard({
 
   return (
     <article
-      className={`project-node ${node.type} ${dragging ? "dragging" : ""} ${readOnly ? "readonly" : ""} ${mcpMissingInstall ? "mcp-install-missing" : ""} connect-${connectionState}`}
-      style={{ left: node.x, top: node.y }}
+      className={`project-node ${node.type} ${dragging ? "dragging" : ""} ${runningPlay ? "running" : ""} ${readOnly ? "readonly" : ""} ${mcpMissingInstall ? "mcp-install-missing" : ""} connect-${connectionState}`}
+      style={{ left: node.x, top: node.y, animationDelay: `${enterDelayMs}ms` }}
       onPointerDown={onPointerDown}
       onClick={(event) => {
         if ((event.target as HTMLElement).closest("button, input, select, textarea, .project-connector, .node-parameter-editor")) return;
