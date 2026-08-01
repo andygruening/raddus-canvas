@@ -109,3 +109,13 @@ At runtime:
 6. Local project data and app settings go through `/api/local-store/*`.
 
 Older browser-local project and MCP data is migrated into the server-backed local JSON store when the app loads.
+
+## Publishing
+
+Use npm to publish a new version of `@raddus/canvas`:
+
+```shell
+npm run publish:patch
+```
+
+Use `npm run publish:minor` or `npm run publish:major` when publishing a larger version bump.
