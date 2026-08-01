@@ -6,6 +6,8 @@ Raddus Canvas is a local web app for building, configuring, and running Claude m
 
 The app is designed to run on your own machine. Your Anthropic API key is handled by the local server instead of being sent to a hosted Raddus backend, so you can use the canvas while keeping key storage under your control.
 
+[![npmjs.com](https://img.shields.io/badge/View%20on%20npmjs.com-6d9abf)](https://www.npmjs.com/package/@raddus/canvas)
+
 <img width="1233" height="527" alt="Raddus Canvas project canvas screenshot" src="https://github.com/user-attachments/assets/ffaf909c-a194-4254-96fc-aaaa4ef2018f" />
 
 ## Features
