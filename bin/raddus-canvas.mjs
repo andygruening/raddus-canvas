@@ -1,5 +1,5 @@
 #!/usr/bin/env node
 
-import { startServer } from "../server/index.mjs";
+import { runCli } from "../server/cli.mjs";
 
-await startServer({ isDev: process.argv.includes("--dev") });
+await runCli();

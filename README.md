@@ -38,6 +38,12 @@ The server prints the local URL when it starts, for example:
 Raddus Canvas listening at http://127.0.0.1:5174
 ```
 
+It also opens that URL in your default browser. To start the server without opening a browser:
+
+```shell
+raddus-canvas --no-open
+```
+
 You can also run it without a global install:
 
 ```shell

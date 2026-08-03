@@ -8,12 +8,14 @@ export async function startServer({ isDev = false, port = defaultPort } = {}) {
   const listeningPort = await listenOnAvailablePort(server, startPort);
   const interval = setInterval(pruneExpiredSessions, 60_000);
   interval.unref?.();
+  const url = `http://${host}:${listeningPort}`;
 
-  console.log(`Raddus Canvas listening at http://${host}:${listeningPort}`);
+  console.log(`Raddus Canvas listening at ${url}`);
 
   return {
     server,
     port: listeningPort,
+    url,
     interval,
     stop: () => new Promise((resolveStop, rejectStop) => {
       clearInterval(interval);
