@@ -12,6 +12,7 @@ import type {
   AgentParameterDraft,
   AgentParameterType,
   AgentRecord,
+  McpPermissionPolicyType,
   McpServerDraft,
   RegisteredMcpServer,
   SkillDraft,
@@ -306,10 +307,14 @@ export function McpServerEditor({
   onChange: (servers: McpServerDraft[]) => void;
   disabled?: boolean;
 }) {
-  function update(id: string, registryId: string) {
+  function updateServer(id: string, registryId: string) {
     const registered = registeredServers.find((server) => server.id === registryId);
     if (!registered) return;
-    onChange(servers.map((server) => (server.id === id ? mcpServerDraftFromRegistered(registered, server.id) : server)));
+    onChange(servers.map((server) => (server.id === id ? { ...mcpServerDraftFromRegistered(registered, server.id), permissionPolicy: server.permissionPolicy ?? "always_allow" } : server)));
+  }
+
+  function updatePermissionPolicy(id: string, permissionPolicy: McpPermissionPolicyType) {
+    onChange(servers.map((server) => (server.id === id ? { ...server, permissionPolicy } : server)));
   }
 
   function remove(id: string) {
@@ -340,7 +345,7 @@ export function McpServerEditor({
         <div className="structured-row mcp-row" key={server.id}>
           <label>
             <span>MCP server</span>
-            <select value={server.registryId} onChange={(event) => update(server.id, event.target.value)} disabled={disabled}>
+            <select value={server.registryId} onChange={(event) => updateServer(server.id, event.target.value)} disabled={disabled}>
               {!server.registryId ? <option value="">{server.name || "Select MCP server"}</option> : null}
               {registeredServers.map((registered) => {
                 const selectedElsewhere = selectedRegistryIds.has(registered.id) && registered.id !== server.registryId;
@@ -350,6 +355,13 @@ export function McpServerEditor({
                   </option>
                 );
               })}
+            </select>
+          </label>
+          <label>
+            <span>Tool approval</span>
+            <select value={server.permissionPolicy ?? "always_allow"} onChange={(event) => updatePermissionPolicy(server.id, event.target.value as McpPermissionPolicyType)} disabled={disabled}>
+              <option value="always_allow">Always allow</option>
+              <option value="always_ask">Ask before use</option>
             </select>
           </label>
           <button className="icon-button row-remove-button" type="button" onClick={() => remove(server.id)} disabled={disabled} title="Remove MCP server">

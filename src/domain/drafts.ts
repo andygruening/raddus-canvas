@@ -8,12 +8,12 @@ import type {
 } from "./types";
 
 export function mcpServerDraftFromRegistered(server: RegisteredMcpServer, id: string = crypto.randomUUID()): McpServerDraft {
-  return { id, registryId: server.id, name: server.name, url: server.url };
+  return { id, registryId: server.id, name: server.name, url: server.url, permissionPolicy: "always_allow" };
 }
 
 export function createMcpServerDraft(registeredServers: RegisteredMcpServer[] = []): McpServerDraft {
   const first = registeredServers[0];
-  return first ? mcpServerDraftFromRegistered(first) : { id: crypto.randomUUID(), registryId: "", name: "", url: "" };
+  return first ? mcpServerDraftFromRegistered(first) : { id: crypto.randomUUID(), registryId: "", name: "", url: "", permissionPolicy: "always_allow" };
 }
 
 export function createSkillDraft(): SkillDraft {

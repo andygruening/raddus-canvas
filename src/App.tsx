@@ -137,6 +137,7 @@ import {
   type ManagedSession,
   type McpAuthEditKind,
   type McpAuthKind,
+  type McpPermissionPolicyType,
   type McpServerDraft,
   type Member,
   type PackageManager,
@@ -326,23 +327,29 @@ export default function App() {
 
   React.useEffect(() => {
     let cancelled = false;
+    if (!auth) {
+      setLocalSettingsReady(false);
+      return () => {
+        cancelled = true;
+      };
+    }
+    setLocalSettingsReady(false);
     void readServerLocalSettings().then((settings) => {
       if (cancelled) return;
       cacheServerLocalSettings(settings);
       if (typeof settings.selectedProjectId === "string") {
         setSelectedProjectId(settings.selectedProjectId);
       }
-      if (settings.canvasViewports) {
-        canvasViewportsRef.current = settings.canvasViewports;
-        setCanvasViewports(settings.canvasViewports);
-      }
+      const nextViewports = settings.canvasViewports ?? {};
+      canvasViewportsRef.current = nextViewports;
+      setCanvasViewports(nextViewports);
     }).catch(() => undefined).finally(() => {
       if (!cancelled) setLocalSettingsReady(true);
     });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [auth?.profile_id]);
 
   React.useEffect(() => {
     let cancelled = false;
@@ -760,8 +767,11 @@ export default function App() {
   function signOut() {
     clearStoredAuth();
     setAuth(null);
+    setLocalSettingsReady(false);
     setProjects([]);
     setSelectedProjectId("");
+    setCanvasViewports({});
+    canvasViewportsRef.current = {};
     setAgents([]);
     setSelectedAgent(null);
     setCanvasReviewOpen(false);
@@ -1416,7 +1426,7 @@ export default function App() {
     const server = mcpServersRef.current.find((item) => item.id === mcpServerId);
     if (!record || !server) return;
 
-    const currentDrafts = mcpServerDraftsFromAgent(record.agent.mcp_servers, mcpServersRef.current);
+    const currentDrafts = mcpServerDraftsFromAgent(record.agent.mcp_servers, mcpServersRef.current, record.agent.tools);
     const nextDrafts = enabled
       ? currentDrafts.some((draft) => draft.registryId === server.id)
         ? currentDrafts
@@ -1429,7 +1439,7 @@ export default function App() {
       body: JSON.stringify({
         version: record.agent.version,
         mcp_servers: selectedMcpServers,
-        tools: serializeMcpToolsets(selectedMcpServers),
+        tools: serializeMcpToolsets(selectedMcpServers, nextDrafts),
       }),
     });
     await loadAgents();
@@ -7408,10 +7418,8 @@ function CreateAgentProposalDialog({
     setError(null);
     setCreating(true);
     try {
-      const selectedMcpServers = serializeMcpServerDrafts(
-        draft.mcp_server_ids.map((registryId) => ({ id: registryId, registryId, name: "", url: "" })),
-        registeredMcpServers,
-      );
+      const selectedMcpServerDrafts: McpServerDraft[] = draft.mcp_server_ids.map((registryId) => ({ id: registryId, registryId, name: "", url: "", permissionPolicy: "always_allow" }));
+      const selectedMcpServers = serializeMcpServerDrafts(selectedMcpServerDrafts, registeredMcpServers);
       const response = await apiFetch<{ agent: Agent }>("/agents", auth, {
         method: "POST",
         body: JSON.stringify({
@@ -7422,7 +7430,7 @@ function CreateAgentProposalDialog({
           project_ids: [projectId],
           global: false,
           mcp_servers: selectedMcpServers,
-          tools: serializeMcpToolsets(selectedMcpServers),
+          tools: serializeMcpToolsets(selectedMcpServers, selectedMcpServerDrafts),
         }),
       });
       await onCreated(response.agent);
@@ -7634,7 +7642,7 @@ function CreateAgentDialog({
         payload.skills = serializeSkillDrafts(skills);
         const selectedMcpServers = serializeMcpServerDrafts(mcpServers, registeredMcpServers);
         payload.mcp_servers = selectedMcpServers;
-        payload.tools = serializeMcpToolsets(selectedMcpServers);
+        payload.tools = serializeMcpToolsets(selectedMcpServers, mcpServers);
         const multiagent = serializeSubAgents(subAgents);
         if (multiagent) payload.multiagent = multiagent;
       }
@@ -7730,7 +7738,7 @@ function AgentDetailsDialog({
   const fallbackProjectIds = initialProjectIds.length > 0 ? initialProjectIds : selectedProjectId ? [selectedProjectId] : [];
   const initialGlobal = initialProjectIds.length === 0;
   const canEdit = workspaceRole === "admin" || (!initialGlobal && projectCanEdit === true);
-  const initialMcpServers = React.useMemo(() => mcpServerDraftsFromAgent(agent.mcp_servers, registeredMcpServers), [agent.mcp_servers, registeredMcpServers]);
+  const initialMcpServers = React.useMemo(() => mcpServerDraftsFromAgent(agent.mcp_servers, registeredMcpServers, agent.tools), [agent.mcp_servers, agent.tools, registeredMcpServers]);
   const initialSkills = React.useMemo(() => skillDraftsFromAgent(agent.skills), [agent.skills]);
   const initialSubAgents = React.useMemo(() => subAgentDraftsFromAgent(agent.multiagent), [agent.multiagent]);
   const subAgentOptions = React.useMemo(() => agents.filter((candidate) => candidate.id !== agent.id), [agents, agent.id]);
@@ -7798,7 +7806,7 @@ function AgentDetailsDialog({
           skills: serializeSkillDrafts(skills),
           multiagent,
           mcp_servers: selectedMcpServers,
-          tools: serializeMcpToolsets(selectedMcpServers),
+          tools: serializeMcpToolsets(selectedMcpServers, mcpServers),
           metadata: { agent_parameter_config: null },
         }),
       });
@@ -9951,11 +9959,11 @@ function normalizeServerLocalSettings(value: JsonObject): ServerLocalSettings {
 }
 
 function cacheServerLocalSettings(settings: ServerLocalSettings): void {
-  if (typeof settings.selectedProjectId === "string") cacheSelectedProjectId(settings.selectedProjectId);
-  if (settings.canvasViewports) cacheCanvasViewports(settings.canvasViewports);
-  if (settings.paletteAgentSections) cacheJsonSetting(paletteAgentSectionsStorageKey, legacyPaletteAgentSectionsStorageKey, settings.paletteAgentSections);
-  if (settings.paletteMcpSections) cacheJsonSetting(paletteMcpSectionsStorageKey, legacyPaletteMcpSectionsStorageKey, settings.paletteMcpSections);
-  if (settings.paletteSkillSections) cacheJsonSetting(paletteSkillSectionsStorageKey, legacyPaletteSkillSectionsStorageKey, settings.paletteSkillSections);
+  cacheSelectedProjectId(typeof settings.selectedProjectId === "string" ? settings.selectedProjectId : "");
+  cacheCanvasViewports(settings.canvasViewports ?? {});
+  cacheJsonSetting(paletteAgentSectionsStorageKey, legacyPaletteAgentSectionsStorageKey, settings.paletteAgentSections ?? { global: true, project: true });
+  cacheJsonSetting(paletteMcpSectionsStorageKey, legacyPaletteMcpSectionsStorageKey, settings.paletteMcpSections ?? { global: true, project: true });
+  cacheJsonSetting(paletteSkillSectionsStorageKey, legacyPaletteSkillSectionsStorageKey, settings.paletteSkillSections ?? { builtIn: true, global: true, project: true });
 }
 
 function errorMessageFromLocalSettingsPayload(payload: unknown): string | null {
@@ -10624,12 +10632,12 @@ function cloneProjectGraph(graph: ProjectGraph): ProjectGraph {
 }
 
 function mcpServerIdsFromAgent(agent: Agent, registeredServers: RegisteredMcpServer[]): string[] {
-  return mcpServerDraftsFromAgent(agent.mcp_servers, registeredServers)
+  return mcpServerDraftsFromAgent(agent.mcp_servers, registeredServers, agent.tools)
     .map((server) => server.registryId)
     .filter((id): id is string => Boolean(id));
 }
 
-function mcpServerDraftsFromAgent(value: unknown, registeredServers: RegisteredMcpServer[]): McpServerDraft[] {
+function mcpServerDraftsFromAgent(value: unknown, registeredServers: RegisteredMcpServer[], tools?: unknown): McpServerDraft[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((server) => {
     if (!isRecord(server) || server.type !== "url" || typeof server.name !== "string" || typeof server.url !== "string") {
@@ -10645,9 +10653,25 @@ function mcpServerDraftsFromAgent(value: unknown, registeredServers: RegisteredM
         registryId: registered?.id ?? "",
         name: registered?.name ?? server.name,
         url: registered?.url ?? server.url,
+        permissionPolicy: mcpPermissionPolicyFromTools(server.name, tools),
       },
     ];
   });
+}
+
+function mcpPermissionPolicyFromTools(serverName: string, tools: unknown): McpPermissionPolicyType {
+  if (!Array.isArray(tools)) return "always_allow";
+  const toolset = tools.find((tool) => isRecord(tool) && tool.type === "mcp_toolset" && typeof tool.mcp_server_name === "string" && tool.mcp_server_name.trim() === serverName.trim());
+  if (!isRecord(toolset)) return "always_allow";
+  const defaultConfig = toolset.default_config;
+  if (!isRecord(defaultConfig)) return "always_allow";
+  const permissionPolicy = defaultConfig.permission_policy;
+  if (!isRecord(permissionPolicy)) return "always_allow";
+  return normalizeMcpPermissionPolicy(permissionPolicy.type);
+}
+
+function normalizeMcpPermissionPolicy(value: unknown): McpPermissionPolicyType {
+  return value === "always_ask" ? "always_ask" : "always_allow";
 }
 
 function skillDraftsFromAgent(value: unknown): SkillDraft[] {
@@ -10832,14 +10856,14 @@ function serializeSubAgents(subAgents: SubAgentDraft[]): JsonObject | null {
   return { type: "coordinator", agents };
 }
 
-function serializeMcpToolsets(servers: JsonObject[]): JsonObject[] {
+function serializeMcpToolsets(servers: JsonObject[], drafts: McpServerDraft[] = []): JsonObject[] {
   const names = servers.map((server) => (typeof server.name === "string" ? server.name.trim() : "")).filter(Boolean);
-  return names.map((name) => ({
+  return names.map((name, index) => ({
     type: "mcp_toolset",
     mcp_server_name: name,
     default_config: {
       enabled: true,
-      permission_policy: { type: "always_allow" },
+      permission_policy: { type: normalizeMcpPermissionPolicy(drafts[index]?.permissionPolicy) },
     },
   }));
 }
@@ -10853,7 +10877,7 @@ function comparableSubAgentDrafts(subAgents: SubAgentDraft[]): Array<Omit<SubAge
 }
 
 function comparableMcpServerDrafts(servers: McpServerDraft[]): Array<Omit<McpServerDraft, "id">> {
-  return servers.map(({ registryId, name, url }) => ({ registryId, name, url }));
+  return servers.map(({ registryId, name, url, permissionPolicy }) => ({ registryId, name, url, permissionPolicy: normalizeMcpPermissionPolicy(permissionPolicy) }));
 }
 
 function subAgentIds(value: unknown): string[] {

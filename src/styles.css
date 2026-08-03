@@ -4073,7 +4073,7 @@ textarea:focus {
 }
 
 .structured-row.mcp-row {
-  grid-template-columns: minmax(220px, 1fr) auto;
+  grid-template-columns: minmax(180px, 1fr) minmax(150px, 0.6fr) auto;
 }
 
 .structured-row.mcp-env-row {

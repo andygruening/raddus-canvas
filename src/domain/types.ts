@@ -5,6 +5,8 @@ export interface AuthSession {
   uuid: string;
   email: string;
   role?: WorkspaceRole;
+  profile_id?: string | null;
+  profile_label?: string | null;
 }
 
 export interface Agent {
@@ -77,11 +79,14 @@ export type PackageManager = "pip" | "npm" | "apt" | "cargo" | "gem" | "go";
 
 export const packageManagers: PackageManager[] = ["pip", "npm", "apt", "cargo", "gem", "go"];
 
+export type McpPermissionPolicyType = "always_allow" | "always_ask";
+
 export interface McpServerDraft {
   id: string;
   registryId: string;
   name: string;
   url: string;
+  permissionPolicy: McpPermissionPolicyType;
 }
 
 export interface RegisteredMcpServer {
@@ -437,4 +442,3 @@ export interface VaultCredential {
   updated_at: string;
   vault_id: string;
 }
-

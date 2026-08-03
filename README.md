@@ -72,14 +72,15 @@ Raddus Canvas is intended to be run locally. The server binds to `127.0.0.1` and
 
 API key handling:
 
-- macOS: the Anthropic API key is stored in macOS Keychain.
+- macOS: Anthropic API keys are stored in macOS Keychain, one item per local Anthropic profile.
 - Other platforms: the Anthropic API key is memory-only for now and is lost when the server exits.
 - The browser receives an HTTP-only local session cookie. It does not need to keep the Anthropic API key in browser storage.
-- Signing out clears the local session and deletes the stored macOS Keychain item.
+- Signing out clears the local session and deletes the active profile's stored macOS Keychain item.
 
 Local app data:
 
 - Projects, MCP server records, selected project, canvas viewport, and UI preferences are stored in a local JSON file.
+- Local records are partitioned by Anthropic API key profile because Anthropic agents, vaults, environments, and related resource IDs are scoped to the API key's workspace/account context.
 - On macOS, the default path is `~/Library/Application Support/Raddus Canvas/data.json`.
 - On Windows, the default path is `%APPDATA%/Raddus Canvas/data.json`.
 - On Linux, the default path is `$XDG_CONFIG_HOME/raddus-canvas/data.json`, or `~/.config/raddus-canvas/data.json` when `XDG_CONFIG_HOME` is not set.
@@ -104,11 +105,11 @@ At runtime:
 1. The user starts the local Node.js server.
 2. The server serves the frontend over localhost.
 3. The frontend signs in through the local server.
-4. The local server validates the Anthropic API key and stores it according to the current platform.
+4. The local server validates the Anthropic API key, maps it to a local profile using a non-secret fingerprint, and stores the key according to the current platform.
 5. Anthropic API calls go through `/api/anthropic/*`.
-6. Local project data and app settings go through `/api/local-store/*`.
+6. Local project data and app settings go through `/api/local-store/*` and are scoped to the active local profile.
 
-Older browser-local project and MCP data is migrated into the server-backed local JSON store when the app loads.
+Older browser-local project and MCP data is migrated into the active profile's server-backed local JSON store when the app loads.
 
 ## Publishing
 

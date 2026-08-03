@@ -86,8 +86,8 @@ async function handleApi(req, res, url) {
     return;
   }
   if (url.pathname === "/api/auth/session" && req.method === "GET") {
-    await ensureSession(req, res);
-    sendJson(res, 200, authPayload());
+    const session = await ensureSession(req, res);
+    sendJson(res, 200, authPayload(session));
     return;
   }
   if (url.pathname === "/api/auth/logout" && req.method === "POST") {
@@ -95,7 +95,8 @@ async function handleApi(req, res, url) {
     return;
   }
   if (url.pathname.startsWith("/api/local-store/")) {
-    await handleLocalStore(req, res, url);
+    const session = await ensureSession(req, res);
+    await handleLocalStore(req, res, url, session);
     return;
   }
   if (url.pathname.startsWith("/api/anthropic/")) {
