@@ -37,7 +37,12 @@ export function SignInView({ themedStyle, onSubmitApiKey }: SignInViewProps) {
             <h1>Raddus Canvas</h1>
           </div>
         </div>
-        <p className="signin-tagline">Enter a valid Anthropic API Key. Your key is securely stored on this device.</p>
+        <p className="signin-tagline">
+          Enter a valid Anthropic API Key. Your key is securely stored on this device.{" "}
+          <a href="https://github.com/andygruening/raddus-canvas#security" target="_blank" rel="noreferrer">
+            Learn More
+          </a>
+        </p>
         <form className="local-key-form" onSubmit={submit}>
           <div className="local-key-input-wrap">
             <input

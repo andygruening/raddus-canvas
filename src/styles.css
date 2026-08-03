@@ -4009,6 +4009,41 @@ textarea:focus {
   font-weight: 700;
 }
 
+.secret-learn-more-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: -4px;
+}
+
+.secret-learn-more-row > span {
+  color: var(--secondary-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.secret-heading-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.secret-learn-more-link {
+  color: var(--brand);
+  font-size: 12px;
+  font-weight: 800;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  white-space: nowrap;
+}
+
+.secret-learn-more-link:hover,
+.secret-learn-more-link:focus-visible {
+  color: var(--brand-hover);
+}
+
 .compact-button {
   min-height: 34px;
   padding: 0 10px;
@@ -4316,6 +4351,17 @@ textarea:focus {
   font-size: 13px;
   line-height: 1.35;
   font-weight: 800;
+}
+
+.signin-tagline a {
+  color: var(--brand);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.signin-tagline a:hover,
+.signin-tagline a:focus-visible {
+  color: var(--brand-hover);
 }
 
 .local-key-form {

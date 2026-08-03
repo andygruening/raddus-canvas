@@ -205,6 +205,7 @@ const localUserEmail = "Local Anthropic key";
 const localCanvasStore = new LocalCanvasStore();
 const themedStyle = themeVariables();
 const defaultCanvasViewport: CanvasViewport = { x: 0, y: 0, zoom: 1 };
+const managedAgentVaultsDocsUrl = "https://platform.claude.com/docs/en/managed-agents/vaults";
 
 export default function App() {
   const [auth, setAuth] = React.useState<AuthSession | null>(null);
@@ -2744,6 +2745,12 @@ function ProjectsView({
     });
   }
 
+  function resetCanvasViewport() {
+    setPalette(null);
+    scheduleCamera(defaultCanvasViewport);
+    if (selectedProject?.id) queueCameraSave(selectedProject.id, defaultCanvasViewport);
+  }
+
   function queueCameraSave(projectId: string, viewport: CanvasViewport) {
     const normalized = normalizeCanvasViewport(viewport);
     if (!normalized) return;
@@ -3155,7 +3162,7 @@ function ProjectsView({
   }, [agents, canEditCurrentProject, mcpServers]);
 
   React.useEffect(() => {
-    if (!draft || !canEditCurrentProject || canvasHelpOpen || apiInfoNodeId || apiKeyCreateNodeId || emailReceiverCreateNodeId) return;
+    if (!draft || canvasHelpOpen || apiInfoNodeId || apiKeyCreateNodeId || emailReceiverCreateNodeId) return;
 
     function onKeyDown(event: KeyboardEvent) {
       const target = event.target;
@@ -3165,7 +3172,11 @@ function ProjectsView({
       ) {
         return;
       }
-      if (event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey && event.key.toLowerCase() === "a") {
+      if (event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey && event.key.toLowerCase() === "r") {
+        event.preventDefault();
+        resetCanvasViewport();
+      }
+      if (canEditCurrentProject && event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey && event.key.toLowerCase() === "a") {
         event.preventDefault();
         openAgentCreateAtCanvasCenter();
       }
@@ -3173,7 +3184,7 @@ function ProjectsView({
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [apiInfoNodeId, apiKeyCreateNodeId, canEditCurrentProject, canvasHelpOpen, draft, emailReceiverCreateNodeId]);
+  }, [apiInfoNodeId, apiKeyCreateNodeId, canEditCurrentProject, canvasHelpOpen, draft, emailReceiverCreateNodeId, selectedProject?.id]);
 
   function pointerDown(event: React.PointerEvent, nodeId: string) {
     if (!canEditCurrentProject) return;
@@ -4141,6 +4152,23 @@ function McpServerIcon({ server, fallbackSize, className }: { server: Registered
   return server?.icon_data_url ? <img className={className} src={server.icon_data_url} alt="" draggable={false} /> : <Server className={className} size={fallbackSize} aria-hidden="true" />;
 }
 
+function VaultLearnMoreLink() {
+  return (
+    <a className="secret-learn-more-link" href={managedAgentVaultsDocsUrl} target="_blank" rel="noreferrer" aria-label="Learn more about managed agent vaults">
+      Learn More
+    </a>
+  );
+}
+
+function VaultLearnMoreRow({ note }: { note?: string }) {
+  return (
+    <div className="secret-learn-more-row">
+      {note ? <span>{note}</span> : null}
+      <VaultLearnMoreLink />
+    </div>
+  );
+}
+
 function IntegrationInstallDialog({
   tutorials,
   packagePresets,
@@ -4294,6 +4322,7 @@ function IntegrationInstallDialog({
                 </FormSection>
               ) : (
                 <FormSection title="Required secret">
+                  <VaultLearnMoreRow note="Your secret is stored directly in Anthropic Vault." />
                   {selectedMcpServer.auth_type === "static_bearer" ? (
                     <label>
                       <span>Bearer token</span>
@@ -4343,6 +4372,7 @@ function IntegrationInstallDialog({
               </div>
               {selectedPackagePreset.environment_variables.length > 0 ? (
                 <FormSection title="Environment values">
+                  <VaultLearnMoreRow />
                   {selectedPackagePreset.environment_variables.map((name) => (
                     <label key={name}>
                       <span>{name}</span>
@@ -4676,6 +4706,12 @@ function CanvasHelpDialog({ onClose }: { onClose: () => void }) {
             <span>+</span>
             <kbd>A</kbd>
             <p>Open the agent creation window.</p>
+          </div>
+          <div className="shortcut-row">
+            <kbd>Shift</kbd>
+            <span>+</span>
+            <kbd>R</kbd>
+            <p>Reset zoom and position.</p>
           </div>
         </div>
       </div>
@@ -6607,6 +6643,7 @@ function CreateSecretDialog({
 
         {kind === "static_bearer" ? (
           <FormSection title="Bearer credential">
+            <VaultLearnMoreRow />
             <label>
               <span>MCP server URL</span>
               <input value={mcpServerUrl} onChange={(event) => setMcpServerUrl(event.target.value)} placeholder="https://example.com/mcp/" required />
@@ -6618,6 +6655,7 @@ function CreateSecretDialog({
           </FormSection>
         ) : (
           <FormSection title="Environment variable">
+            <VaultLearnMoreRow />
             <label>
               <span>Secret name</span>
               <input value={secretName} onChange={(event) => setSecretName(event.target.value)} placeholder="API_KEY" required />
@@ -6760,14 +6798,20 @@ function CreateMcpServerDialog({
             </select>
           </label>
           {authKind === "static_bearer" ? (
-            <label>
-              <span>Bearer token</span>
-              <input value={token} onChange={(event) => setToken(event.target.value)} type="password" required />
-            </label>
+            <>
+              <VaultLearnMoreRow />
+              <label>
+                <span>Bearer token</span>
+                <input value={token} onChange={(event) => setToken(event.target.value)} type="password" required />
+              </label>
+            </>
           ) : authKind === "environment_variable" ? (
             <div className="structured-editor">
               <div className="structured-editor-head">
-                <span>Environment variables</span>
+                <span className="secret-heading-copy">
+                  <span>Environment variables</span>
+                  <VaultLearnMoreLink />
+                </span>
                 <button className="secondary-button compact-button" type="button" onClick={addEnvironmentVariable}>
                   <Plus size={15} aria-hidden="true" />
                   Add variable

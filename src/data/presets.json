@@ -1,14 +1,6 @@
 {
   "mcpServers": [
     {
-      "id": "clickup",
-      "name": "ClickUp",
-      "description": "ClickUp.",
-      "url": "https://clickup-mcp.raddus.dev/mcp",
-      "icon_data_url": "https://cdn.iconscout.com/icon/free/png-512/free-klick-nach-oben-icon-svg-download-png-14515365.png?f=webp&w=512",
-      "auth_type": "static_bearer"
-    },
-    {
       "id": "github",
       "name": "GitHub",
       "description": "GitHub.",
@@ -22,22 +14,6 @@
       "description": "Email.",
       "url": "https://mcp.resend.com/mcp",
       "icon_data_url": "https://cdn.iconscout.com/icon/free/png-512/free-erneut-senden-icon-svg-download-png-14604020.png?f=webp&w=512",
-      "auth_type": "static_bearer"
-    },
-    {
-      "id": "slack",
-      "name": "Slack",
-      "description": "Slack.",
-      "url": "https://slack-mcp.raddus.dev/mcp",
-      "icon_data_url": "https://cdn.iconscout.com/icon/free/png-512/free-slack-logo-icon-svg-download-png-2284889.png?f=webp&w=512",
-      "auth_type": "static_bearer"
-    },
-    {
-      "id": "google-maps",
-      "name": "Google Maps",
-      "description": "Google Maps.",
-      "url": "https://google-maps-mcp.raddus.dev/mcp",
-      "icon_data_url": "https://cdn.iconscout.com/icon/free/png-512/free-google-maps-logo-icon-svg-download-png-2476488.png?f=webp&w=512",
       "auth_type": "static_bearer"
     }
   ],
