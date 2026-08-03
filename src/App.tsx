@@ -3239,9 +3239,6 @@ function ProjectsView({
   function edgeTypeForCanvasConnection(source: ProjectNode, target: ProjectNode): ProjectEdgeType | null {
     const type = projectEdgeTypeFor(source, target);
     if (!type) return null;
-    if ((type === "sub_agent" && isGlobalAgentNode(source, agents)) || ((type === "uses_mcp" || type === "uses_skill") && isGlobalAgentNode(target, agents))) {
-      return null;
-    }
     if (type === "uses_mcp") {
       const mcpAlreadyConnected = graph.edges.some((edge) => edge.source === source.id && edge.type === "uses_mcp" && edge.target !== target.id);
       if (mcpAlreadyConnected) return null;
@@ -10476,12 +10473,6 @@ function projectEdgeTypeFor(source: ProjectNode, target: ProjectNode): ProjectEd
   return null;
 }
 
-function isGlobalAgentNode(node: ProjectNode, agents: AgentRecord[]): boolean {
-  if (node.type !== "agent" || !node.agent_id) return false;
-  const record = agents.find((candidate) => candidate.id === node.agent_id);
-  return record ? agentIsGlobal(record.agent) : false;
-}
-
 function syncProjectGraphAgentDependencies(graph: ProjectGraph, agents: AgentRecord[], registeredServers: RegisteredMcpServer[]): ProjectGraph {
   let next = cloneProjectGraph(graph);
   const maxIterations = Math.max(1, agents.length + 1);
@@ -10504,11 +10495,10 @@ function syncProjectGraphAgentDependenciesOnce(graph: ProjectGraph, agents: Agen
   for (const source of nodes.filter((node) => node.type === "agent" && node.agent_id && agentById.has(node.agent_id))) {
     const record = agentById.get(source.agent_id ?? "");
     if (!record) continue;
-    const globalAgent = agentIsGlobal(record.agent);
 
-    const desiredSubAgentIds = globalAgent ? [] : subAgentIds(record.agent.multiagent);
+    const desiredSubAgentIds = subAgentIds(record.agent.multiagent);
     const desiredSubAgentSet = new Set(desiredSubAgentIds);
-    const desiredMcpServerIds = globalAgent ? [] : mcpServerIdsFromAgent(record.agent, registeredServers);
+    const desiredMcpServerIds = mcpServerIdsFromAgent(record.agent, registeredServers);
     const desiredMcpServerSet = new Set(desiredMcpServerIds);
 
     edges = edges.filter((edge) => {
