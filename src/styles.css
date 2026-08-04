@@ -1811,6 +1811,11 @@ textarea:focus {
   border-radius: 999px;
 }
 
+.project-select-group {
+  width: 300px;
+  max-width: calc(100vw - 32px);
+}
+
 .setup-warning-label {
   position: absolute;
   top: 16px;
@@ -1845,8 +1850,10 @@ textarea:focus {
 }
 
 .project-select {
-  width: 190px;
-  max-width: 38vw;
+  flex: 1 1 auto;
+  min-width: 0;
+  width: auto;
+  max-width: none;
   min-height: var(--button-height);
   padding: 0 12px;
   border: 1px solid var(--secondary-button-border);
@@ -1924,6 +1931,10 @@ textarea:focus {
   cursor: grabbing;
 }
 
+.project-canvas.palette-dragging {
+  cursor: copy;
+}
+
 .grid-field {
   position: absolute;
   inset: 0;
@@ -1934,6 +1945,11 @@ textarea:focus {
   background-size: 24px 24px;
   mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.88), rgba(0, 0, 0, 0.54));
   -webkit-mask-image: linear-gradient(to bottom, rgba(0, 0, 0, 0.88), rgba(0, 0, 0, 0.54));
+  transition: background-color var(--motion-hover);
+}
+
+.project-canvas.palette-drop-ready .grid-field {
+  background-color: color-mix(in srgb, var(--brand-surface) 58%, transparent);
 }
 
 .project-world {
@@ -1971,6 +1987,10 @@ textarea:focus {
   stroke-width: 2;
   animation: connectionPreviewFlow 820ms linear infinite;
   pointer-events: none;
+}
+
+.project-edge-preview.palette-edge-preview {
+  stroke: var(--success-fg);
 }
 
 .project-edge-status {
@@ -2054,6 +2074,49 @@ textarea:focus {
     border-color var(--motion-hover),
     box-shadow var(--motion-hover),
     transform var(--motion-hover);
+}
+
+.project-node.palette-node-preview {
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 0;
+  overflow: hidden;
+  border-style: dashed;
+  border-color: var(--brand-border);
+  background: color-mix(in srgb, var(--brand-surface) 76%, var(--surface-bg));
+  color: var(--brand-hover);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand) 10%, transparent), var(--popover-shadow);
+  opacity: 0.86;
+  pointer-events: none;
+  animation: none;
+  transition: none;
+}
+
+.project-node.palette-node-preview.connect-valid {
+  border-color: var(--success-fg);
+  background: color-mix(in srgb, var(--success-soft) 74%, var(--surface-bg));
+  color: var(--success-fg);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--success-fg) 14%, transparent), var(--popover-shadow);
+}
+
+.palette-node-preview-label {
+  min-width: 0;
+  max-width: 100%;
+  display: inline-grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.palette-node-preview-label > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .project-node.connect-source {
@@ -2146,6 +2209,17 @@ textarea:focus {
   background: var(--success-soft);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--success-fg) 18%, transparent);
   animation: connectorValidPulse 1.25s ease-in-out infinite;
+}
+
+.project-canvas.palette-dragging .project-node.connect-valid:not(.palette-node-preview) {
+  border-color: color-mix(in srgb, var(--success-fg) 38%, var(--border-subtle));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--success-fg) 10%, transparent), var(--popover-shadow);
+}
+
+.project-canvas.palette-dragging .project-node.connect-valid .project-connector {
+  border-color: var(--success-fg);
+  background: var(--success-soft);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--success-fg) 18%, transparent);
 }
 
 .project-canvas.connecting .project-node.connect-invalid .project-connector {
@@ -2851,14 +2925,16 @@ textarea:focus {
 
 .project-card-palette {
   position: absolute;
-  z-index: 20;
-  width: 320px;
-  max-height: 420px;
+  top: calc(var(--button-height) + 50px);
+  left: 16px;
+  z-index: 12;
+  width: 300px;
+  height: 360px;
   overflow: hidden;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   border: 1px solid var(--border-subtle);
-  border-radius: var(--card-radius);
+  border-radius: 16px;
   background: var(--surface-bg);
   box-shadow: var(--popover-shadow);
   animation: paletteIn 150ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
@@ -2866,26 +2942,68 @@ textarea:focus {
 
 .palette-tabs {
   display: grid;
-  grid-template-columns: repeat(4, 1fr) auto;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 4px;
   padding: 8px;
   border-bottom: 1px solid var(--border-subtle);
-  background: var(--table-header-bg);
+  background: #fff;
 }
 
-.palette-tabs > button:not(.icon-button) {
-  min-height: 30px;
-  border: 0;
-  border-radius: var(--button-radius);
-  background: transparent;
+.palette-tab {
+  min-width: 0;
+  min-height: 28px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: center;
+  border-radius: 12px;
   color: var(--secondary-text);
-  font-size: 12px;
-  font-weight: 800;
+  overflow: hidden;
 }
 
-.palette-tabs > button.active {
+.palette-tab.active {
   background: var(--brand-surface);
   color: var(--brand-hover);
+}
+
+.palette-tab.active.with-add {
+  grid-template-columns: minmax(0, 1fr) 22px;
+  gap: 2px;
+  padding-right: 3px;
+}
+
+.palette-tab-label {
+  min-width: 0;
+  min-height: 28px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: inherit;
+  font-size: 10px;
+  font-weight: 800;
+  padding: 0 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.palette-tab-add-button {
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid var(--brand-border);
+  border-radius: 999px;
+  background: #fff;
+  color: var(--brand-hover);
+  cursor: pointer;
+}
+
+.palette-tab-add-button:hover,
+.palette-tab-add-button:focus-visible {
+  border-color: var(--brand-hover);
+  background: var(--surface-bg);
 }
 
 .palette-list {
@@ -2918,7 +3036,7 @@ textarea:focus {
   background: var(--table-row-hover);
 }
 
-.palette-list > button {
+.palette-list > .palette-drag-item {
   min-width: 0;
   min-height: 48px;
   display: grid;
@@ -2927,10 +3045,33 @@ textarea:focus {
   align-items: center;
   padding: 8px 10px;
   border: 0;
-  border-radius: var(--button-radius);
+  border-radius: 12px;
   background: transparent;
   color: inherit;
   text-align: left;
+}
+
+.palette-list > .palette-drag-item.has-action {
+  grid-template-columns: 20px minmax(0, 1fr) 28px;
+  padding-right: 6px;
+}
+
+.palette-list > .palette-drag-item {
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.palette-list > .palette-drag-item:active {
+  cursor: grabbing;
+}
+
+.palette-list > .palette-drag-item.dragging {
+  outline: 1px solid var(--brand-border);
+  outline-offset: -1px;
+  background: var(--brand-surface);
+  color: var(--brand-hover);
+  cursor: grabbing;
 }
 
 .palette-list > .palette-section-toggle {
@@ -2943,16 +3084,14 @@ textarea:focus {
   text-transform: uppercase;
 }
 
+.palette-list > .palette-drag-item:hover,
+.palette-list > .palette-drag-item:focus-visible,
 .palette-list > button:hover,
 .palette-list > button:focus-visible {
   background: var(--table-row-hover);
 }
 
-.palette-list > button:disabled {
-  opacity: 0.55;
-}
-
-.palette-list > button span {
+.palette-list > .palette-drag-item span {
   min-width: 0;
   display: grid;
   gap: 2px;
@@ -2976,11 +3115,35 @@ textarea:focus {
   object-fit: contain;
   user-select: none;
   -webkit-user-drag: none;
+  pointer-events: none;
 }
 
-.palette-create-button {
-  margin-top: 6px;
-  border-top: 1px solid var(--border-subtle) !important;
+.palette-tile-remove {
+  justify-self: end;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--secondary-text);
+  cursor: pointer;
+}
+
+.palette-tile-remove:hover,
+.palette-tile-remove:focus-visible {
+  border-color: var(--danger-bg);
+  background: var(--danger-soft);
+  color: var(--danger-fg);
+}
+
+.palette-tile-remove[aria-disabled="true"] {
+  opacity: 0.65;
+  border-color: transparent;
+  background: transparent;
+  cursor: default;
 }
 
 .palette-empty {
@@ -4698,6 +4861,10 @@ textarea:focus {
     min-height: 520px;
   }
 
+  .project-canvas:has(.setup-warning-label) .project-card-palette {
+    top: 132px;
+  }
+
   .setup-warning-label {
     top: 72px;
     max-width: calc(100% - 32px);
@@ -4885,6 +5052,11 @@ textarea:focus {
     width: 100%;
     height: calc(100vh - 20px);
     max-height: calc(100vh - 20px);
+  }
+
+  .project-card-palette {
+    width: 300px;
+    height: 360px;
   }
 
   .resource-details-scroll {

@@ -263,6 +263,7 @@ export default function App() {
   const [mcpServers, setMcpServers] = React.useState<RegisteredMcpServer[]>([]);
   const [mcpServersLoading, setMcpServersLoading] = React.useState(false);
   const [mcpServerSaving, setMcpServerSaving] = React.useState(false);
+  const [removingMcpServerId, setRemovingMcpServerId] = React.useState<string | null>(null);
   const [mcpServersError, setMcpServersError] = React.useState<string | null>(null);
   const [selectedMcpServer, setSelectedMcpServer] = React.useState<RegisteredMcpServer | null>(null);
   const [skills, setSkills] = React.useState<SkillRecord[]>([]);
@@ -312,6 +313,7 @@ export default function App() {
   const [membersError, setMembersError] = React.useState<string | null>(null);
   const [memberRoleSavingUuid, setMemberRoleSavingUuid] = React.useState<string | null>(null);
   const [loading, setLoading] = React.useState(false);
+  const [removingAgentId, setRemovingAgentId] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const agentsRef = React.useRef<AgentRecord[]>([]);
   const mcpServersRef = React.useRef<RegisteredMcpServer[]>([]);
@@ -830,6 +832,27 @@ export default function App() {
   async function handleChanged() {
     setSelectedAgent(null);
     await loadAgents();
+  }
+
+  async function removeAgent(record: AgentRecord) {
+    if (!auth || removingAgentId) return;
+    if (!window.confirm(`Remove agent "${record.agent.name}"? This archives it in Anthropic.`)) return;
+
+    setRemovingAgentId(record.id);
+    setProjectsError(null);
+    try {
+      await apiFetch<{ agent: Agent }>(`/agents/${encodeURIComponent(record.id)}/archive`, auth, { method: "POST", body: "{}" });
+      setSelectedAgent((current) => (current?.id === record.id ? null : current));
+      await loadAgents();
+    } catch (removeError) {
+      setProjectsError(errorMessage(removeError));
+      if (isUnauthorized(removeError)) {
+        clearStoredAuth();
+        setAuth(null);
+      }
+    } finally {
+      setRemovingAgentId(null);
+    }
   }
 
   async function createProject(name: string): Promise<ProjectRecord> {
@@ -1740,6 +1763,42 @@ export default function App() {
     }
   }
 
+  async function removeMcpServer(server: RegisteredMcpServer) {
+    if (!auth || removingMcpServerId) return;
+    const vaultId = selectedProjectVaultId || server.vault_id || "";
+    const confirmation = vaultId
+      ? `Remove MCP server "${server.name}" and delete its matching credential from the selected vault?`
+      : `Remove MCP server "${server.name}"?`;
+    if (!window.confirm(confirmation)) return;
+
+    setRemovingMcpServerId(server.id);
+    setMcpServersError(null);
+    setVaultsError(null);
+    setProjectsError(null);
+    try {
+      await apiFetch<{ mcpServer: RegisteredMcpServer }>(`/mcp-servers/${encodeURIComponent(server.id)}`, auth, {
+        method: "DELETE",
+        body: JSON.stringify({
+          vault_id: vaultId || undefined,
+          credential_id: server.credential_id,
+        }),
+      });
+      setSelectedMcpServer((current) => (current?.id === server.id ? null : current));
+      const vaultIdsToRefresh = uniqueStrings([vaultId, server.vault_id ?? ""].filter(Boolean));
+      await Promise.all([loadMcpServers(), loadVaults(), ...vaultIdsToRefresh.map((id) => loadVaultCredentials(id))]);
+    } catch (removeError) {
+      const message = errorMessage(removeError);
+      setMcpServersError(message);
+      setProjectsError(message);
+      if (isUnauthorized(removeError)) {
+        clearStoredAuth();
+        setAuth(null);
+      }
+    } finally {
+      setRemovingMcpServerId(null);
+    }
+  }
+
   async function createApiKey(name: string, projectId = selectedProjectId): Promise<{ apiKey: ApiKeyRecord; key: string } | null> {
     if (!auth) return null;
     if (!projectId) throw new Error("Select a project before creating an API key.");
@@ -2035,6 +2094,8 @@ export default function App() {
               stoppingSessionId={stoppingSessionId}
               skillsLoading={skillsLoading}
               skillSaving={skillSaving}
+              removingAgentId={removingAgentId}
+              removingMcpServerId={removingMcpServerId}
               apiKeySaving={apiKeySaving}
               emailReceiverSaving={emailReceiverSaving}
               currentUserId={auth.uuid}
@@ -2082,7 +2143,13 @@ export default function App() {
               onCreateEmailReceiver={createEmailReceiver}
               onRotateApiKey={(apiKey) => rotateApiKey(apiKey, false)}
               onOpenAgent={setSelectedAgent}
+              onRemoveAgent={(record) => {
+                void removeAgent(record);
+              }}
               onOpenMcpServer={setSelectedMcpServer}
+              onRemoveMcpServer={(server) => {
+                void removeMcpServer(server);
+              }}
               onOpenMcpInstall={(server) => {
                 setMcpServerToInstall(server);
                 setIntegrationToInstall(null);
@@ -2381,6 +2448,72 @@ export default function App() {
   );
 }
 
+type ProjectCardPaletteItem =
+  | { type: "play" }
+  | { type: "schedule" }
+  | { type: "api" }
+  | { type: "agent"; agentId: string }
+  | { type: "mcp"; mcpServerId: string }
+  | { type: "skill"; skillId: string };
+
+interface PaletteDropConnection {
+  source: ProjectNode;
+  target: ProjectNode;
+  type: ProjectEdgeType;
+  targetNodeId: string;
+}
+
+interface PaletteDragPreview {
+  item: ProjectCardPaletteItem;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  connection: PaletteDropConnection | null;
+}
+
+interface CanvasNodeRect {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+function paletteItemKey(item: ProjectCardPaletteItem): string {
+  if (item.type === "agent") return `${item.type}:${item.agentId}`;
+  if (item.type === "mcp") return `${item.type}:${item.mcpServerId}`;
+  if (item.type === "skill") return `${item.type}:${item.skillId}`;
+  return item.type;
+}
+
+function paletteNodeDropSize(type: ProjectCardPaletteItem["type"]): { width: number; height: number } {
+  return projectNodeSizeForType(type);
+}
+
+function projectNodeSizeForType(type: ProjectNodeType): { width: number; height: number } {
+  if (type === "play") return { width: 260, height: 132 };
+  if (type === "agent") return { width: 180, height: 88 };
+  if (type === "mcp") return { width: 148, height: 56 };
+  if (type === "skill") return { width: 200, height: 92 };
+  if (type === "api") return { width: 240, height: 96 };
+  if (type === "slack" || type === "email") return { width: 240, height: 96 };
+  return { width: 240, height: 132 };
+}
+
+function projectNodeRect(node: ProjectNode): CanvasNodeRect {
+  const size = projectNodeSizeForType(node.type);
+  return { x: node.x, y: node.y, width: size.width, height: size.height };
+}
+
+function canvasRectsOverlap(left: CanvasNodeRect, right: CanvasNodeRect, padding = 0): boolean {
+  return (
+    left.x < right.x + right.width + padding &&
+    left.x + left.width + padding > right.x &&
+    left.y < right.y + right.height + padding &&
+    left.y + left.height + padding > right.y
+  );
+}
+
 function ProjectsView({
   projects,
   selectedProjectId,
@@ -2406,6 +2539,8 @@ function ProjectsView({
   stoppingSessionId,
   skillsLoading,
   skillSaving,
+  removingAgentId,
+  removingMcpServerId,
   apiKeySaving,
   emailReceiverSaving,
   currentUserId,
@@ -2433,7 +2568,9 @@ function ProjectsView({
   onCreateEmailReceiver,
   onRotateApiKey,
   onOpenAgent,
+  onRemoveAgent,
   onOpenMcpServer,
+  onRemoveMcpServer,
   onOpenMcpInstall,
   onOpenSkill,
   onOpenIntegrationInstall,
@@ -2470,6 +2607,8 @@ function ProjectsView({
   stoppingSessionId: string | null;
   skillsLoading: boolean;
   skillSaving: boolean;
+  removingAgentId: string | null;
+  removingMcpServerId: string | null;
   apiKeySaving: boolean;
   emailReceiverSaving: boolean;
   currentUserId: string;
@@ -2497,7 +2636,9 @@ function ProjectsView({
   onCreateEmailReceiver: (name: string) => Promise<{ emailReceiver: EmailReceiverRecord } | null>;
   onRotateApiKey: (apiKey: ApiKeyRecord) => Promise<{ apiKey: ApiKeyRecord; key: string } | null>;
   onOpenAgent: (record: AgentRecord) => void;
+  onRemoveAgent: (record: AgentRecord) => void;
   onOpenMcpServer: (server: RegisteredMcpServer) => void;
+  onRemoveMcpServer: (server: RegisteredMcpServer) => void;
   onOpenMcpInstall: (server: RegisteredMcpServer) => void;
   onOpenSkill: (skill: SkillRecord) => void;
   onOpenIntegrationInstall: (integration: IntegrationRecord) => void;
@@ -2514,8 +2655,9 @@ function ProjectsView({
   const [draft, setDraft] = React.useState<ProjectRecord | null>(selectedProject);
   const [draggingNodeId, setDraggingNodeId] = React.useState<string | null>(null);
   const [connectingFromId, setConnectingFromId] = React.useState<string | null>(null);
-  const [lastPaletteTab, setLastPaletteTab] = React.useState<PaletteTab>("triggers");
-  const [palette, setPalette] = React.useState<{ x: number; y: number; tab: PaletteTab } | null>(null);
+  const [paletteTab, setPaletteTab] = React.useState<PaletteTab>("triggers");
+  const [draggingPaletteItemKey, setDraggingPaletteItemKey] = React.useState<string | null>(null);
+  const [paletteDragPreview, setPaletteDragPreview] = React.useState<PaletteDragPreview | null>(null);
   const [camera, setCamera] = React.useState<CanvasViewport>(defaultCanvasViewport);
   const [playPanelNodeId, setPlayPanelNodeId] = React.useState<string | null>(null);
   const [selectedPlaySessionId, setSelectedPlaySessionId] = React.useState("");
@@ -2756,7 +2898,6 @@ function ProjectsView({
   }
 
   function resetCanvasViewport() {
-    setPalette(null);
     scheduleCamera(defaultCanvasViewport);
     if (selectedProject?.id) queueCameraSave(selectedProject.id, defaultCanvasViewport);
   }
@@ -2820,7 +2961,6 @@ function ProjectsView({
         mcpServers,
       ),
     }));
-    setPalette(null);
   }
 
   function addMcpAt(mcpServerId: string, x: number, y: number) {
@@ -2832,7 +2972,6 @@ function ProjectsView({
         nodes: [...current.graph.nodes, { id: crypto.randomUUID(), type: "mcp", mcp_server_id: mcpServerId, x, y }],
       },
     }));
-    setPalette(null);
   }
 
   function addSkillAt(skillId: string, x: number, y: number) {
@@ -2844,7 +2983,6 @@ function ProjectsView({
         nodes: [...current.graph.nodes, { id: crypto.randomUUID(), type: "skill", skill_id: skillId, x, y }],
       },
     }));
-    setPalette(null);
   }
 
   function addPlayAt(x: number, y: number) {
@@ -2855,7 +2993,6 @@ function ProjectsView({
         nodes: [...current.graph.nodes, { id: crypto.randomUUID(), type: "play", x, y }],
       },
     }));
-    setPalette(null);
   }
 
   function addScheduleAt(x: number, y: number) {
@@ -2876,7 +3013,6 @@ function ProjectsView({
         edges: current.graph.edges,
       },
     }));
-    setPalette(null);
   }
 
   function addSlackAt(x: number, y: number) {
@@ -2896,7 +3032,6 @@ function ProjectsView({
         ],
       },
     }));
-    setPalette(null);
   }
 
   function addApiAt(x: number, y: number) {
@@ -2916,7 +3051,6 @@ function ProjectsView({
         ],
       },
     }));
-    setPalette(null);
   }
 
   function addEmailAt(x: number, y: number) {
@@ -2936,47 +3070,200 @@ function ProjectsView({
         ],
       },
     }));
-    setPalette(null);
   }
 
   function openAgentCreate() {
     if (!canEditCurrentProject) return;
-    const position = palette ? { x: palette.x, y: palette.y } : undefined;
-    setPalette(null);
-    onCreateAgent(position);
+    onCreateAgent(canvasCenterToWorld());
   }
 
   function openAgentCreateAtCanvasCenter() {
     if (!canEditCurrentProject) return;
-    setPalette(null);
     onCreateAgent(canvasCenterToWorld());
   }
 
   function openMcpServerCreate() {
     if (!canEditCurrentProject) return;
-    setPalette(null);
     onCreateMcpServer();
   }
 
   function openSkillCreate() {
     if (!canEditCurrentProject) return;
-    setPalette(null);
     setSkillCreateOpen(true);
   }
 
   function openAgentDetails(record: AgentRecord) {
-    setPalette(null);
     onOpenAgent(record);
   }
 
   function openMcpServerDetails(server: RegisteredMcpServer) {
-    setPalette(null);
     onOpenMcpServer(server);
   }
 
   function openSettingsPage() {
-    setPalette(null);
     onOpenSettings();
+  }
+
+  function createPaletteProjectNode(item: ProjectCardPaletteItem, x: number, y: number, id: string = crypto.randomUUID()): ProjectNode {
+    if (item.type === "play") return { id, type: "play", x, y };
+    if (item.type === "schedule") return { id, type: "schedule", x, y, schedule: createDefaultScheduleDraft() };
+    if (item.type === "api") return { id, type: "api", x, y, api_trigger: createDefaultApiTriggerDraft(ownedApiKeys) };
+    if (item.type === "agent") return { id, type: "agent", agent_id: item.agentId, x, y };
+    if (item.type === "mcp") return { id, type: "mcp", mcp_server_id: item.mcpServerId, x, y };
+    return { id, type: "skill", skill_id: item.skillId, x, y };
+  }
+
+  function addPaletteItemAt(item: ProjectCardPaletteItem, x: number, y: number, targetNodeId?: string) {
+    const node = createPaletteProjectNode(item, x, y);
+    const targetNode = targetNodeId ? graph.nodes.find((candidate) => candidate.id === targetNodeId) : undefined;
+    const connection = targetNode ? paletteConnectionForTarget(node, targetNode) : null;
+    const edge = connection ? { id: crypto.randomUUID(), source: connection.source.id, target: connection.target.id, type: connection.type } : null;
+    const nextGraph: ProjectGraph = {
+      ...graph,
+      nodes: [...graph.nodes, node],
+      edges: edge ? [...graph.edges, edge] : graph.edges,
+    };
+
+    updateDraft((current) => ({
+      ...current,
+      graph: edge || node.type !== "agent" ? nextGraph : syncProjectGraphAgentDependencies(nextGraph, agents, mcpServers),
+    }));
+    if (edge) void handleEdgeAdded(edge, nextGraph);
+  }
+
+  function paletteConnectionForTarget(sourceCandidate: ProjectNode, target: ProjectNode): PaletteDropConnection | null {
+    if (sourceCandidate.type === "agent" && target.type === "agent") {
+      if (!sourceCandidate.agent_id || !target.agent_id || sourceCandidate.agent_id === target.agent_id) return null;
+      const duplicateSubAgent = graph.edges.some((edge) => {
+        if (edge.source !== target.id || edge.type !== "sub_agent") return false;
+        const existingSubAgent = graph.nodes.find((node) => node.id === edge.target);
+        return existingSubAgent?.type === "agent" && existingSubAgent.agent_id === sourceCandidate.agent_id;
+      });
+      if (duplicateSubAgent) return null;
+      const type = edgeTypeForCanvasConnection(target, sourceCandidate);
+      return type ? { source: target, target: sourceCandidate, type, targetNodeId: target.id } : null;
+    }
+
+    if (sourceCandidate.type === "agent" && localIsTriggerNodeType(target.type)) {
+      if (!sourceCandidate.agent_id) return null;
+      const type = edgeTypeForCanvasConnection(target, sourceCandidate);
+      if (!type) return null;
+      const duplicateTriggerAgent = graph.edges.some((edge) => {
+        if (edge.source !== target.id || edge.type !== type) return false;
+        const existingAgent = graph.nodes.find((node) => node.id === edge.target);
+        return existingAgent?.type === "agent" && existingAgent.agent_id === sourceCandidate.agent_id;
+      });
+      return duplicateTriggerAgent ? null : { source: target, target: sourceCandidate, type, targetNodeId: target.id };
+    }
+
+    const type = edgeTypeForCanvasConnection(sourceCandidate, target);
+    return type ? { source: sourceCandidate, target, type, targetNodeId: target.id } : null;
+  }
+
+  function paletteConnectedDropPosition(item: ProjectCardPaletteItem, target: ProjectNode, size: { width: number; height: number }): { x: number; y: number } {
+    const side = paletteConnectedDropSide(item, target);
+    const targetCenter = projectNodeCenter(target);
+    const targetSize = projectNodeSizeForType(target.type);
+    const horizontalGap = 88;
+    const x = side === "right" ? target.x + targetSize.width + horizontalGap : target.x - size.width - horizontalGap;
+    const preferredY = targetCenter.y - size.height / 2;
+    return paletteAvailableNeighborPosition(Math.round(x), Math.round(preferredY), size);
+  }
+
+  function paletteConnectedDropSide(item: ProjectCardPaletteItem, target: ProjectNode): "left" | "right" {
+    if (target.type === "agent" && (item.type === "agent" || item.type === "mcp" || item.type === "skill")) return "right";
+    if (item.type === "agent" && localIsTriggerNodeType(target.type)) return "right";
+    return "left";
+  }
+
+  function paletteAvailableNeighborPosition(x: number, preferredY: number, size: { width: number; height: number }): { x: number; y: number } {
+    const padding = 26;
+    const slotStep = Math.max(size.height + padding, 84);
+    const slotOffsets = [0];
+    for (let index = 1; index <= 18; index += 1) {
+      slotOffsets.push(index, -index);
+    }
+
+    for (const offset of slotOffsets) {
+      const candidate = { x, y: Math.round(preferredY + offset * slotStep), width: size.width, height: size.height };
+      const collides = graph.nodes.some((node) => canvasRectsOverlap(candidate, projectNodeRect(node), padding));
+      if (!collides) return { x: candidate.x, y: candidate.y };
+    }
+
+    return { x, y: Math.round(preferredY + slotStep * (slotOffsets.length + 1)) };
+  }
+
+  function paletteDragPreviewForPoint(item: ProjectCardPaletteItem, clientX: number, clientY: number): PaletteDragPreview | null {
+    if (!isPaletteDropPoint(clientX, clientY)) return null;
+    const size = paletteNodeDropSize(item.type);
+    const point = screenToWorld(clientX, clientY);
+    let x = Math.round(point.x - size.width / 2);
+    let y = Math.round(point.y - size.height / 2);
+    let connection: PaletteDropConnection | null = null;
+    const targetNode = paletteTargetNodeAt(clientX, clientY);
+
+    if (targetNode) {
+      const connectedPosition = paletteConnectedDropPosition(item, targetNode, size);
+      const connectedCandidate = createPaletteProjectNode(item, connectedPosition.x, connectedPosition.y, "palette-preview");
+      connection = paletteConnectionForTarget(connectedCandidate, targetNode);
+      if (connection) {
+        x = connectedPosition.x;
+        y = connectedPosition.y;
+      }
+    }
+
+    return { item, x, y, width: size.width, height: size.height, connection };
+  }
+
+  function isPaletteDropPoint(clientX: number, clientY: number): boolean {
+    const canvas = canvasRef.current;
+    if (!canvas) return false;
+    const rect = canvas.getBoundingClientRect();
+    if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) return false;
+    const target = document.elementFromPoint(clientX, clientY);
+    if (target instanceof HTMLElement && target.closest(".project-card-palette, .project-controls-overlay, .project-workspace-overlay")) return false;
+    return true;
+  }
+
+  function paletteTargetNodeAt(clientX: number, clientY: number): ProjectNode | null {
+    const target = document.elementFromPoint(clientX, clientY);
+    const targetNodeId = target instanceof HTMLElement ? target.closest<HTMLElement>("[data-project-node-id]")?.dataset.projectNodeId : undefined;
+    return targetNodeId ? graph.nodes.find((node) => node.id === targetNodeId) ?? null : null;
+  }
+
+  function beginPaletteItemDrag(event: React.PointerEvent<HTMLElement>, item: ProjectCardPaletteItem, onOpen?: () => void) {
+    if (!canEditCurrentProject) return;
+    event.preventDefault();
+    event.stopPropagation();
+
+    const itemKey = paletteItemKey(item);
+    const startX = event.clientX;
+    const startY = event.clientY;
+    let moved = false;
+    setDraggingPaletteItemKey(itemKey);
+    setPaletteDragPreview(null);
+    event.currentTarget.setPointerCapture(event.pointerId);
+
+    function onMove(moveEvent: PointerEvent) {
+      if (Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) > 4) moved = true;
+      setPaletteDragPreview(moved ? paletteDragPreviewForPoint(item, moveEvent.clientX, moveEvent.clientY) : null);
+    }
+
+    function onUp(upEvent: PointerEvent) {
+      if (moved) {
+        const preview = paletteDragPreviewForPoint(item, upEvent.clientX, upEvent.clientY);
+        if (preview) addPaletteItemAt(item, preview.x, preview.y, preview.connection?.targetNodeId);
+      } else {
+        onOpen?.();
+      }
+      setDraggingPaletteItemKey(null);
+      setPaletteDragPreview(null);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+    }
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
   }
 
   function removeNode(nodeId: string) {
@@ -3258,7 +3545,6 @@ function ProjectsView({
     if (!canEditCurrentProject) return;
     event.preventDefault();
     event.stopPropagation();
-    setPalette(null);
     setConnectingFromId(nodeId);
     updateConnectionPreview(event.clientX, event.clientY);
 
@@ -3402,17 +3688,6 @@ function ProjectsView({
 
   function handleCanvasPointerDown(event: React.PointerEvent<HTMLDivElement>) {
     if ((event.target as HTMLElement).closest(".project-node, .project-controls-overlay, .project-workspace-overlay, .project-card-palette")) return;
-    if (canEditCurrentProject && event.metaKey) {
-      const point = screenToWorld(event.clientX, event.clientY);
-      setPalette({
-        x: point.x,
-        y: point.y,
-        tab: lastPaletteTab,
-      });
-      return;
-    }
-
-    setPalette(null);
     const startX = event.clientX;
     const startY = event.clientY;
     const startCamera = cameraRef.current;
@@ -3485,7 +3760,7 @@ function ProjectsView({
       ) : (
         <>
           <div
-            className={`project-canvas ${connectingFromId ? "connecting" : ""}`}
+            className={`project-canvas ${connectingFromId ? "connecting" : ""} ${draggingPaletteItemKey ? "palette-dragging" : ""} ${paletteDragPreview ? "palette-drop-ready" : ""}`}
             ref={canvasRef}
             onPointerDown={handleCanvasPointerDown}
             onWheel={handleCanvasWheel}
@@ -3564,6 +3839,29 @@ function ProjectsView({
 
             {error ? <div className="project-error-overlay notice error">{error}</div> : null}
 
+            {canEditCurrentProject ? (
+              <ProjectCardPalette
+                tab={paletteTab}
+                agents={agents}
+                mcpServers={mcpServers}
+                skills={skills}
+                skillsLoading={skillsLoading}
+                draggingItemKey={draggingPaletteItemKey}
+                onTabChange={setPaletteTab}
+                onBeginDrag={beginPaletteItemDrag}
+                onCreateAgent={openAgentCreate}
+                onCreateMcpServer={openMcpServerCreate}
+                onCreateSkill={openSkillCreate}
+                onOpenAgent={openAgentDetails}
+                onOpenMcpServer={openMcpServerDetails}
+                onOpenSkill={onOpenSkill}
+                onRemoveAgent={onRemoveAgent}
+                onRemoveMcpServer={onRemoveMcpServer}
+                removingAgentId={removingAgentId}
+                removingMcpServerId={removingMcpServerId}
+              />
+            ) : null}
+
             <div className="project-world" style={{ transform: `translate(${camera.x}px, ${camera.y}px) scale(${camera.zoom})` }}>
               <svg className="project-edges" aria-hidden="true">
                 {graph.edges.map((edge, edgeIndex) => {
@@ -3595,7 +3893,6 @@ function ProjectsView({
                           onPointerDown={(event) => event.stopPropagation()}
                           onClick={(event) => {
                             event.stopPropagation();
-                            setPalette(null);
                             setPlayPanelNodeId(source.id);
                             if (status.sessionId) void selectPlaySession(status.sessionId);
                           }}
@@ -3609,6 +3906,9 @@ function ProjectsView({
                   );
                 })}
                 <path className="project-edge-preview" ref={connectionPreviewPathRef} style={{ display: "none" }} />
+                {paletteDragPreview?.connection ? (
+                  <path className="project-edge-preview palette-edge-preview" d={edgePath(paletteDragPreview.connection.source, paletteDragPreview.connection.target)} />
+                ) : null}
               </svg>
 
               {graph.nodes.map((node, nodeIndex) => {
@@ -3620,6 +3920,8 @@ function ProjectsView({
                       ? edgeTypeForCanvasConnection(connectingFrom, node)
                         ? "valid"
                         : "invalid"
+                      : paletteDragPreview?.connection?.targetNodeId === node.id
+                        ? "valid"
                       : "idle";
                 const mcpServer = node.mcp_server_id ? mcpServers.find((server) => server.id === node.mcp_server_id) : undefined;
                 const mcpInstallStatus = node.type === "mcp" && mcpServer
@@ -3653,7 +3955,6 @@ function ProjectsView({
                     onPlayPromptChange={(prompt) => updatePlayPrompt(node.id, prompt)}
                     onRunPlay={() => void runPlay(node)}
                     onOpenPlay={() => {
-                      setPalette(null);
                       setPlayPanelNodeId(node.id);
                       const availableSessions = sessionsForTrigger(node.id);
                       if (availableSessions[0]) void selectPlaySession(availableSessions[0].id);
@@ -3670,30 +3971,7 @@ function ProjectsView({
                   />
                 );
               })}
-
-              {palette && canEditCurrentProject ? (
-                <ProjectCardPalette
-                  palette={palette}
-                  agents={agents}
-                  mcpServers={mcpServers}
-                  skills={skills}
-                  skillsLoading={skillsLoading}
-                  onTabChange={(tab) => {
-                    setLastPaletteTab(tab);
-                    setPalette((current) => (current ? { ...current, tab } : current));
-                  }}
-                  onAddPlay={() => addPlayAt(palette.x, palette.y)}
-                  onAddSchedule={() => addScheduleAt(palette.x, palette.y)}
-                  onAddApi={() => addApiAt(palette.x, palette.y)}
-                  onAddAgent={(agentId) => addAgentAt(agentId, palette.x, palette.y)}
-                  onAddMcp={(mcpServerId) => addMcpAt(mcpServerId, palette.x, palette.y)}
-                  onAddSkill={(skillId) => addSkillAt(skillId, palette.x, palette.y)}
-                  onCreateAgent={openAgentCreate}
-                  onCreateMcpServer={openMcpServerCreate}
-                  onCreateSkill={openSkillCreate}
-                  onClose={() => setPalette(null)}
-                />
-              ) : null}
+              {paletteDragPreview ? <PaletteNodePreview preview={paletteDragPreview} agents={agents} mcpServers={mcpServers} skills={skills} /> : null}
             </div>
           </div>
 
@@ -3957,40 +4235,93 @@ function ProjectNodeCard({
   );
 }
 
+function PaletteNodePreview({
+  preview,
+  agents,
+  mcpServers,
+  skills,
+}: {
+  preview: PaletteDragPreview;
+  agents: AgentRecord[];
+  mcpServers: RegisteredMcpServer[];
+  skills: SkillRecord[];
+}) {
+  const item = preview.item;
+  const mcpServer = item.type === "mcp" ? mcpServers.find((server) => server.id === item.mcpServerId) : undefined;
+  const title = palettePreviewTitle(item, agents, mcpServers, skills);
+  return (
+    <article
+      className={`project-node palette-node-preview ${item.type} ${preview.connection ? "connect-valid" : ""}`}
+      style={{ left: preview.x, top: preview.y, width: preview.width, height: preview.height, minHeight: preview.height }}
+      aria-hidden="true"
+    >
+      <div className="palette-node-preview-label">
+        {item.type === "play" ? (
+          <Play size={16} aria-hidden="true" />
+        ) : item.type === "schedule" ? (
+          <Calendar size={16} aria-hidden="true" />
+        ) : item.type === "api" ? (
+          <KeyRound size={16} aria-hidden="true" />
+        ) : item.type === "agent" ? (
+          <Bot size={16} aria-hidden="true" />
+        ) : item.type === "mcp" ? (
+          <McpServerIcon server={mcpServer} fallbackSize={16} />
+        ) : (
+          <Sparkles size={16} aria-hidden="true" />
+        )}
+        <span>{title}</span>
+      </div>
+    </article>
+  );
+}
+
+function palettePreviewTitle(item: ProjectCardPaletteItem, agents: AgentRecord[], mcpServers: RegisteredMcpServer[], skills: SkillRecord[]): string {
+  if (item.type === "play") return "Play";
+  if (item.type === "schedule") return "Schedule";
+  if (item.type === "api") return "API";
+  if (item.type === "agent") return agents.find((record) => record.id === item.agentId)?.agent.name ?? "Agent";
+  if (item.type === "mcp") return mcpServers.find((server) => server.id === item.mcpServerId)?.name ?? "MCP";
+  return skills.find((skill) => skill.id === item.skillId)?.display_title ?? "Skill";
+}
+
 function ProjectCardPalette({
-  palette,
+  tab,
   agents,
   mcpServers,
   skills,
   skillsLoading,
+  draggingItemKey,
   onTabChange,
-  onAddPlay,
-  onAddSchedule,
-  onAddApi,
-  onAddAgent,
-  onAddMcp,
-  onAddSkill,
+  onBeginDrag,
   onCreateAgent,
   onCreateMcpServer,
   onCreateSkill,
-  onClose,
+  onOpenAgent,
+  onOpenMcpServer,
+  onOpenSkill,
+  onRemoveAgent,
+  onRemoveMcpServer,
+  removingAgentId,
+  removingMcpServerId,
 }: {
-  palette: { x: number; y: number; tab: PaletteTab };
+  tab: PaletteTab;
   agents: AgentRecord[];
   mcpServers: RegisteredMcpServer[];
   skills: SkillRecord[];
   skillsLoading: boolean;
+  draggingItemKey: string | null;
   onTabChange: (tab: PaletteTab) => void;
-  onAddPlay: () => void;
-  onAddSchedule: () => void;
-  onAddApi: () => void;
-  onAddAgent: (agentId: string) => void;
-  onAddMcp: (mcpServerId: string) => void;
-  onAddSkill: (skillId: string) => void;
+  onBeginDrag: (event: React.PointerEvent<HTMLElement>, item: ProjectCardPaletteItem, onOpen?: () => void) => void;
   onCreateAgent: () => void;
   onCreateMcpServer: () => void;
   onCreateSkill: () => void;
-  onClose: () => void;
+  onOpenAgent: (record: AgentRecord) => void;
+  onOpenMcpServer: (server: RegisteredMcpServer) => void;
+  onOpenSkill: (skill: SkillRecord) => void;
+  onRemoveAgent: (record: AgentRecord) => void;
+  onRemoveMcpServer: (server: RegisteredMcpServer) => void;
+  removingAgentId: string | null;
+  removingMcpServerId: string | null;
 }) {
   const builtInSkills = skills.filter((skill) => skill.source === "anthropic");
   const globalSkills = skills.filter((skill) => !skillIsBuiltIn(skill) && skillIsGlobal(skill));
@@ -4005,67 +4336,74 @@ function ProjectCardPalette({
     });
   }
 
+  function tabCreateAction(nextTab: PaletteTab): (() => void) | null {
+    if (nextTab === "agents") return onCreateAgent;
+    if (nextTab === "mcps") return onCreateMcpServer;
+    if (nextTab === "skills") return onCreateSkill;
+    return null;
+  }
+
+  function renderTabButton(nextTab: PaletteTab, label: string) {
+    const selected = tab === nextTab;
+    const createAction = selected ? tabCreateAction(nextTab) : null;
+    return (
+      <div className={`palette-tab ${selected ? "active" : ""} ${createAction ? "with-add" : ""}`} role="presentation">
+        <button className="palette-tab-label" type="button" role="tab" aria-selected={selected} onClick={() => onTabChange(nextTab)}>
+          {label}
+        </button>
+        {createAction ? (
+          <button className="palette-tab-add-button" type="button" onClick={createAction} aria-label={`Create ${label === "MCPs" ? "MCP" : label.slice(0, -1)}`} title={`Create ${label === "MCPs" ? "MCP" : label.slice(0, -1)}`}>
+            <Plus size={13} aria-hidden="true" />
+          </button>
+        ) : null}
+      </div>
+    );
+  }
+
   return (
-    <div className="project-card-palette" style={{ left: palette.x, top: palette.y }} role="dialog" aria-label="Create project card" onWheel={(event) => event.stopPropagation()}>
+    <aside className="project-card-palette" aria-label="Create project cards" onPointerDown={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()}>
       <div className="palette-tabs" role="tablist" aria-label="Card categories">
-        <button className={palette.tab === "triggers" ? "active" : ""} type="button" onClick={() => onTabChange("triggers")}>
-          Triggers
-        </button>
-        <button className={palette.tab === "agents" ? "active" : ""} type="button" onClick={() => onTabChange("agents")}>
-          Agents
-        </button>
-        <button className={palette.tab === "mcps" ? "active" : ""} type="button" onClick={() => onTabChange("mcps")}>
-          MCPs
-        </button>
-        <button className={palette.tab === "skills" ? "active" : ""} type="button" onClick={() => onTabChange("skills")}>
-          Skills
-        </button>
-        <button className="icon-button compact-icon" type="button" onClick={onClose} title="Close">
-          <X size={14} aria-hidden="true" />
-        </button>
+        {renderTabButton("triggers", "Triggers")}
+        {renderTabButton("agents", "Agents")}
+        {renderTabButton("mcps", "MCPs")}
+        {renderTabButton("skills", "Skills")}
       </div>
 
-      {palette.tab === "triggers" ? (
+      {tab === "triggers" ? (
         <div className="palette-list">
-          <button type="button" onClick={onAddPlay}>
-            <Play size={16} aria-hidden="true" />
-            <span>
-              <strong>Play</strong>
-              <small>Main run card</small>
-            </span>
-          </button>
-          <button type="button" onClick={onAddSchedule}>
-            <Calendar size={16} aria-hidden="true" />
-            <span>
-              <strong>Schedule</strong>
-              <small>Timed deployment trigger</small>
-            </span>
-          </button>
-          <button type="button" onClick={onAddApi}>
-            <KeyRound size={16} aria-hidden="true" />
-            <span>
-              <strong>API</strong>
-              <small>Copy cURL helper</small>
-            </span>
-          </button>
+          <PaletteDragButton item={{ type: "play" }} icon={<Play size={16} aria-hidden="true" />} title="Play" description="Main run card" draggingItemKey={draggingItemKey} onBeginDrag={onBeginDrag} />
+          <PaletteDragButton item={{ type: "schedule" }} icon={<Calendar size={16} aria-hidden="true" />} title="Schedule" description="Timed deployment trigger" draggingItemKey={draggingItemKey} onBeginDrag={onBeginDrag} />
+          <PaletteDragButton item={{ type: "api" }} icon={<KeyRound size={16} aria-hidden="true" />} title="API" description="Copy cURL helper" draggingItemKey={draggingItemKey} onBeginDrag={onBeginDrag} />
         </div>
-      ) : palette.tab === "agents" ? (
+      ) : tab === "agents" ? (
         <div className="palette-list">
           {agents.length === 0 ? <div className="palette-empty">No agents available</div> : null}
-          {agents.map((record) => <PaletteAgentButton record={record} onAddAgent={onAddAgent} key={record.id} />)}
-          <button className="palette-create-button" type="button" onClick={onCreateAgent}>
-            <Plus size={16} aria-hidden="true" />
-            Create new Agent
-          </button>
+          {agents.map((record) => (
+            <PaletteAgentButton
+              record={record}
+              draggingItemKey={draggingItemKey}
+              onBeginDrag={onBeginDrag}
+              onOpen={() => onOpenAgent(record)}
+              onRemove={() => onRemoveAgent(record)}
+              removing={removingAgentId === record.id}
+              key={record.id}
+            />
+          ))}
         </div>
-      ) : palette.tab === "mcps" ? (
+      ) : tab === "mcps" ? (
         <div className="palette-list">
           {mcpServers.length === 0 ? <div className="palette-empty">No MCP servers available</div> : null}
-          {mcpServers.map((server) => <PaletteMcpButton server={server} onAddMcp={onAddMcp} key={server.id} />)}
-          <button className="palette-create-button" type="button" onClick={onCreateMcpServer}>
-            <Plus size={16} aria-hidden="true" />
-            Create new MCP
-          </button>
+          {mcpServers.map((server) => (
+            <PaletteMcpButton
+              server={server}
+              draggingItemKey={draggingItemKey}
+              onBeginDrag={onBeginDrag}
+              onOpen={() => onOpenMcpServer(server)}
+              onRemove={() => onRemoveMcpServer(server)}
+              removing={removingMcpServerId === server.id}
+              key={server.id}
+            />
+          ))}
         </div>
       ) : (
         <div className="palette-list">
@@ -4082,7 +4420,7 @@ function ProjectCardPalette({
           </button>
           {skillSectionsOpen.builtIn ? (
             builtInSkills.length > 0 ? (
-              builtInSkills.map((skill) => <PaletteSkillButton skill={skill} onAddSkill={onAddSkill} key={skill.id} />)
+              builtInSkills.map((skill) => <PaletteSkillButton skill={skill} draggingItemKey={draggingItemKey} onBeginDrag={onBeginDrag} onOpen={() => onOpenSkill(skill)} key={skill.id} />)
             ) : (
               <div className="palette-empty">No built-in skills</div>
             )
@@ -4093,7 +4431,7 @@ function ProjectCardPalette({
           </button>
           {skillSectionsOpen.global ? (
             globalSkills.length > 0 ? (
-              globalSkills.map((skill) => <PaletteSkillButton skill={skill} onAddSkill={onAddSkill} key={skill.id} />)
+              globalSkills.map((skill) => <PaletteSkillButton skill={skill} draggingItemKey={draggingItemKey} onBeginDrag={onBeginDrag} onOpen={() => onOpenSkill(skill)} key={skill.id} />)
             ) : (
               <div className="palette-empty">No global skills</div>
             )
@@ -4104,53 +4442,166 @@ function ProjectCardPalette({
           </button>
           {skillSectionsOpen.project ? (
             projectSkills.length > 0 ? (
-              projectSkills.map((skill) => <PaletteSkillButton skill={skill} onAddSkill={onAddSkill} key={skill.id} />)
+              projectSkills.map((skill) => <PaletteSkillButton skill={skill} draggingItemKey={draggingItemKey} onBeginDrag={onBeginDrag} onOpen={() => onOpenSkill(skill)} key={skill.id} />)
             ) : (
               <div className="palette-empty">No project skills</div>
             )
           ) : null}
-          <button className="palette-create-button" type="button" onClick={onCreateSkill}>
-            <Plus size={16} aria-hidden="true" />
-            Create new Skill
-          </button>
         </div>
       )}
+    </aside>
+  );
+}
+
+function PaletteDragButton({
+  item,
+  icon,
+  title,
+  description,
+  draggingItemKey,
+  onBeginDrag,
+  onOpen,
+  action,
+  tooltip,
+}: {
+  item: ProjectCardPaletteItem;
+  icon: React.ReactNode;
+  title: string;
+  description: string;
+  draggingItemKey: string | null;
+  onBeginDrag: (event: React.PointerEvent<HTMLElement>, item: ProjectCardPaletteItem, onOpen?: () => void) => void;
+  onOpen?: () => void;
+  action?: React.ReactNode;
+  tooltip?: string;
+}) {
+  const itemKey = paletteItemKey(item);
+  return (
+    <div
+      className={`${draggingItemKey === itemKey ? "palette-drag-item dragging" : "palette-drag-item"} ${action ? "has-action" : ""}`}
+      role="button"
+      tabIndex={0}
+      onPointerDown={(event) => onBeginDrag(event, item, onOpen)}
+      onKeyDown={(event) => {
+        if (!onOpen || (event.key !== "Enter" && event.key !== " ")) return;
+        event.preventDefault();
+        onOpen();
+      }}
+      title={tooltip ?? title}
+      aria-label={onOpen ? `${title}. Drag to canvas or open details.` : `Drag ${title} to canvas`}
+    >
+      {icon}
+      <span>
+        <strong>{title}</strong>
+        <small>{description}</small>
+      </span>
+      {action}
     </div>
   );
 }
 
-function PaletteMcpButton({ server, onAddMcp }: { server: RegisteredMcpServer; onAddMcp: (mcpServerId: string) => void }) {
+function PaletteMcpButton({
+  server,
+  draggingItemKey,
+  onBeginDrag,
+  onOpen,
+  onRemove,
+  removing,
+}: {
+  server: RegisteredMcpServer;
+  draggingItemKey: string | null;
+  onBeginDrag: (event: React.PointerEvent<HTMLElement>, item: ProjectCardPaletteItem, onOpen?: () => void) => void;
+  onOpen: () => void;
+  onRemove: () => void;
+  removing: boolean;
+}) {
   return (
-    <button type="button" onClick={() => onAddMcp(server.id)} title={server.id}>
-      <McpServerIcon className="palette-mcp-icon" server={server} fallbackSize={16} />
-      <span>
-        <strong>{server.name}</strong>
-        <small>{server.description || "No description"}</small>
-      </span>
-    </button>
+    <PaletteDragButton
+      item={{ type: "mcp", mcpServerId: server.id }}
+      icon={<McpServerIcon className="palette-mcp-icon" server={server} fallbackSize={16} />}
+      title={server.name}
+      description={server.description || "No description"}
+      draggingItemKey={draggingItemKey}
+      onBeginDrag={onBeginDrag}
+      onOpen={onOpen}
+      action={<PaletteTileRemoveButton label={`Remove ${server.name}`} removing={removing} onRemove={onRemove} />}
+      tooltip={server.id}
+    />
   );
 }
 
-function PaletteSkillButton({ skill, onAddSkill }: { skill: SkillRecord; onAddSkill: (skillId: string) => void }) {
+function PaletteSkillButton({
+  skill,
+  draggingItemKey,
+  onBeginDrag,
+  onOpen,
+}: {
+  skill: SkillRecord;
+  draggingItemKey: string | null;
+  onBeginDrag: (event: React.PointerEvent<HTMLElement>, item: ProjectCardPaletteItem, onOpen?: () => void) => void;
+  onOpen: () => void;
+}) {
   return (
-    <button type="button" onClick={() => onAddSkill(skill.id)} title={skill.id}>
-      <Sparkles size={16} aria-hidden="true" />
-      <span>
-        <strong>{skill.display_title || skill.id}</strong>
-        <small>{skill.description?.trim() || "No description"}</small>
-      </span>
-    </button>
+    <PaletteDragButton
+      item={{ type: "skill", skillId: skill.id }}
+      icon={<Sparkles size={16} aria-hidden="true" />}
+      title={skill.display_title || skill.id}
+      description={skill.description?.trim() || "No description"}
+      draggingItemKey={draggingItemKey}
+      onBeginDrag={onBeginDrag}
+      onOpen={onOpen}
+      tooltip={skill.id}
+    />
   );
 }
 
-function PaletteAgentButton({ record, onAddAgent }: { record: AgentRecord; onAddAgent: (agentId: string) => void }) {
+function PaletteAgentButton({
+  record,
+  draggingItemKey,
+  onBeginDrag,
+  onOpen,
+  onRemove,
+  removing,
+}: {
+  record: AgentRecord;
+  draggingItemKey: string | null;
+  onBeginDrag: (event: React.PointerEvent<HTMLElement>, item: ProjectCardPaletteItem, onOpen?: () => void) => void;
+  onOpen: () => void;
+  onRemove: () => void;
+  removing: boolean;
+}) {
   return (
-    <button type="button" onClick={() => onAddAgent(record.id)}>
-      <Bot size={16} aria-hidden="true" />
-      <span>
-        <strong>{record.agent.name}</strong>
-        <small>{record.agent.description || "No description"}</small>
-      </span>
+    <PaletteDragButton
+      item={{ type: "agent", agentId: record.id }}
+      icon={<Bot size={16} aria-hidden="true" />}
+      title={record.agent.name}
+      description={record.agent.description || "No description"}
+      draggingItemKey={draggingItemKey}
+      onBeginDrag={onBeginDrag}
+      onOpen={onOpen}
+      action={<PaletteTileRemoveButton label={`Remove ${record.agent.name}`} removing={removing} onRemove={onRemove} />}
+    />
+  );
+}
+
+function PaletteTileRemoveButton({ label, removing, onRemove }: { label: string; removing: boolean; onRemove: () => void }) {
+  return (
+    <button
+      className="palette-tile-remove"
+      type="button"
+      aria-label={label}
+      aria-disabled={removing}
+      title={label}
+      onPointerDown={(event) => {
+        event.stopPropagation();
+      }}
+      onClick={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (removing) return;
+        onRemove();
+      }}
+    >
+      {removing ? <Loader2 className="spin" size={13} aria-hidden="true" /> : <Trash2 size={13} aria-hidden="true" />}
     </button>
   );
 }
@@ -4702,12 +5153,6 @@ function CanvasHelpDialog({ onClose }: { onClose: () => void }) {
     <Modal title="Canvas controls" onClose={onClose}>
       <div className="canvas-help">
         <div className="shortcut-list" aria-label="Canvas shortcuts">
-          <div className="shortcut-row">
-            <kbd>⌘</kbd>
-            <span>+</span>
-            <kbd>Click</kbd>
-            <p>Open card options at the clicked canvas position.</p>
-          </div>
           <div className="shortcut-row">
             <kbd>Shift</kbd>
             <span>+</span>
@@ -8050,6 +8495,10 @@ async function apiFetch<T>(path: string, auth: AuthSession, init: RequestInit = 
     const mcpServer = await saveLocalMcpServer(anthropic, { ...(body as JsonObject), id: decodeURIComponent(mcpServerMatch[1]) });
     return { mcpServer } as T;
   }
+  if (mcpServerMatch && method === "DELETE") {
+    const mcpServer = await deleteLocalMcpServer(anthropic, decodeURIComponent(mcpServerMatch[1]), body);
+    return { mcpServer } as T;
+  }
 
   if (path === "/skills" && method === "GET") {
     return { skills: (await anthropic.listSkills()).map(normalizeSkill) } as T;
@@ -9560,18 +10009,20 @@ function localMcpCredentialAuths(auth: JsonObject, authType: McpAuthKind, mcpSer
   });
 }
 
+type StoredMcpServerRecord = RegisteredMcpServer & { archived_at?: string | null };
+
 async function listLocalMcpServers(): Promise<RegisteredMcpServer[]> {
   const presets = normalizePresetMcpServers();
-  const stored = await localCanvasStore.listMcpServers<RegisteredMcpServer>();
+  const stored = await localCanvasStore.listMcpServers<StoredMcpServerRecord>();
   const storedIds = new Set(stored.map((server) => server.id));
-  return [...stored, ...presets.filter((server) => !storedIds.has(server.id))];
+  return [...stored.filter((server) => !server.archived_at), ...presets.filter((server) => !storedIds.has(server.id))];
 }
 
 async function saveLocalMcpServer(anthropic: AnthropicProxyApi, body: unknown): Promise<RegisteredMcpServer> {
   const value = isRecord(body) ? body : {};
   const now = new Date().toISOString();
   const existing = stringValue(value.id)
-    ? (await localCanvasStore.listMcpServers<RegisteredMcpServer>()).find((server) => server.id === stringValue(value.id))
+    ? (await localCanvasStore.listMcpServers<StoredMcpServerRecord>()).find((server) => server.id === stringValue(value.id))
     : null;
   const auth = isRecord(value.auth) ? value.auth : null;
   const authType = mcpAuthKindValue(value.auth_type) ?? (auth ? mcpAuthKindValue(auth.type) : null) ?? existing?.auth_type ?? "no_auth";
@@ -9605,6 +10056,68 @@ async function saveLocalMcpServer(anthropic: AnthropicProxyApi, body: unknown): 
   };
   await localCanvasStore.saveMcpServer(server);
   return server;
+}
+
+async function deleteLocalMcpServer(anthropic: AnthropicProxyApi, serverId: string, body: unknown): Promise<RegisteredMcpServer> {
+  const payload = isRecord(body) ? body : {};
+  const presets = normalizePresetMcpServers();
+  const stored = await localCanvasStore.listMcpServers<StoredMcpServerRecord>();
+  const storedServer = stored.find((server) => server.id === serverId && !server.archived_at);
+  const presetServer = presets.find((server) => server.id === serverId);
+  const server = storedServer ?? presetServer;
+  if (!server) throw new ApiError("MCP server not found.", 404);
+
+  const vaultId = nullableStringValue(payload.vault_id) ?? server.vault_id ?? null;
+  if (vaultId) {
+    const credentials = (await anthropic.listVaultCredentials(vaultId)).map(normalizeVaultCredential);
+    const credentialIds = uniqueStrings([
+      ...stringArray(payload.credential_ids),
+      nullableStringValue(payload.credential_id) ?? "",
+      server.credential_id ?? "",
+      ...mcpCredentialIdsForServer(server, credentials),
+    ].filter(Boolean));
+    for (const credentialId of credentialIds) {
+      try {
+        await anthropic.deleteVaultCredential(vaultId, credentialId);
+      } catch (deleteError) {
+        if (!(deleteError instanceof AnthropicApiError && deleteError.status === 404)) throw deleteError;
+      }
+    }
+  }
+
+  if (presetServer) {
+    await localCanvasStore.saveMcpServer<StoredMcpServerRecord>({
+      ...server,
+      project_ids: [],
+      vault_id: null,
+      credential_id: null,
+      archived_at: new Date().toISOString(),
+    });
+  } else {
+    await localCanvasStore.deleteMcpServer(serverId);
+  }
+
+  return server;
+}
+
+function mcpCredentialIdsForServer(server: RegisteredMcpServer, credentials: VaultCredential[]): string[] {
+  const credentialIds = new Set<string>();
+  for (const credential of activeVaultCredentials(credentials)) {
+    if (server.credential_id && credential.id === server.credential_id) credentialIds.add(credential.id);
+    if (server.auth_type === "static_bearer") {
+      const serverUrl = normalizeMcpTemplateUrl(server.url);
+      if (credential.auth.type === "static_bearer" && normalizeMcpTemplateUrl(stringValue(credential.auth.mcp_server_url) ?? "") === serverUrl) {
+        credentialIds.add(credential.id);
+      }
+    }
+    if (server.auth_type === "environment_variable") {
+      const [host] = mcpServerAllowedHosts(server.url);
+      if (host && credential.auth.type === "environment_variable" && environmentCredentialMatchesHost(credential.auth, host)) {
+        credentialIds.add(credential.id);
+      }
+    }
+  }
+  return [...credentialIds];
 }
 
 function normalizePresetMcpServers(): RegisteredMcpServer[] {

@@ -31,6 +31,10 @@ export class LocalCanvasStore {
     return server;
   }
 
+  async deleteMcpServer(serverId: string): Promise<void> {
+    await this.delete(mcpServerStoreName, serverId);
+  }
+
   private async list<T>(storeName: string): Promise<T[]> {
     await migrateBrowserDataToServer();
     const response = await serverStoreFetch<{ records: T[] }>(`/api/local-store/${encodeURIComponent(storeName)}`);
