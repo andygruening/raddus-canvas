@@ -18,7 +18,10 @@
   "scripts": {
     "ensure-deps": "[ -x node_modules/.bin/tsc ] && [ -x node_modules/.bin/vite ] || npm ci",
     "dev": "npm run ensure-deps && node bin/raddus-canvas.mjs --dev",
+    "typecheck": "npm run ensure-deps && tsc --noEmit",
+    "test": "npm run typecheck",
     "build": "npm run ensure-deps && tsc --noEmit && vite build",
+    "verify": "npm run build",
     "prepack": "npm run build",
     "publish:patch": "npm ci && npm version patch && npm publish --access public && git push --follow-tags",
     "publish:minor": "npm ci && npm version minor && npm publish --access public && git push --follow-tags",
